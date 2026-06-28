@@ -20,8 +20,11 @@ permissions:
   packages: write
 
 concurrency:
+  # Grouped per ref: superseded edge builds on a branch (e.g. main) cancel so
+  # only the newest commit's images are built. Tag releases each have a unique
+  # ref, so they get their own group and are never cancelled mid-build.
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   images:
