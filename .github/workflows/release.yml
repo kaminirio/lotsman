@@ -95,11 +95,11 @@ jobs:
             cwd://${{ steps.meta-cli.outputs.bake-file }}
           targets: server,agent,cli
           push: true
+          provenance: false
           set: |
             *.args.VERSION=${{ steps.meta-server.outputs.version }}
             *.cache-from=type=gha,scope=lotsman
             *.cache-to=type=gha,mode=max,scope=lotsman
-            *.provenance=false
 
       # Pull each just-pushed image (amd64 on this runner) and run its version
       # command, so a broken image can never get tagged :latest / :edge.
