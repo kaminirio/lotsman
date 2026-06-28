@@ -6,9 +6,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 
 	"lotsman/internal/agent"
@@ -19,6 +21,11 @@ import (
 var version = "dev"
 
 func main() {
+	if slices.ContainsFunc(os.Args[1:], isVersionFlag) {
+		fmt.Println("lotsman-agent " + version)
+		return
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
@@ -38,4 +45,9 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("agent stopped")
+}
+
+// isVersionFlag reports whether an argument requests the version and exits.
+func isVersionFlag(arg string) bool {
+	return arg == "-version" || arg == "--version"
 }

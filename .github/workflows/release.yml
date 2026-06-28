@@ -28,12 +28,18 @@ concurrency:
 
 jobs:
   images:
-    name: Build & push (${{ matrix.target }})
+    name: Build, push & smoke-test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [server, agent, cli]
+    # Same tag rules for all three images; defined once and reused below.
+    env:
+      TAG_RULES: |
+        type=ref,event=branch
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}
+        type=semver,pattern={{major}}
+        type=sha,prefix=sha-
+        type=edge,branch=main
+        type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -50,31 +56,68 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata
-        id: meta
+      # One metadata step per image (each has its own name/tags); bake-target
+      # binds the generated tags+labels onto the matching bake target.
+      - name: Metadata (server)
+        id: meta-server
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository_owner }}/lotsman-${{ matrix.target }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,prefix=sha-
-            type=edge,branch=main
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          images: ghcr.io/${{ github.repository_owner }}/lotsman-server
+          bake-target: server
+          tags: ${{ env.TAG_RULES }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - name: Metadata (agent)
+        id: meta-agent
+        uses: docker/metadata-action@v6
         with:
-          context: .
-          target: ${{ matrix.target }}
-          platforms: linux/amd64,linux/arm64
+          images: ghcr.io/${{ github.repository_owner }}/lotsman-agent
+          bake-target: agent
+          tags: ${{ env.TAG_RULES }}
+
+      - name: Metadata (cli)
+        id: meta-cli
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/lotsman-cli
+          bake-target: cli
+          tags: ${{ env.TAG_RULES }}
+
+      # Single bake invocation: the shared UI + Go build stages compile ONCE
+      # and all three images are emitted and pushed. Go cross-compiles to each
+      # platform (see Dockerfile), so there is no emulated compilation.
+      - name: Build & push
+        uses: docker/bake-action@v7
+        with:
+          files: |
+            ./docker-bake.hcl
+            cwd://${{ steps.meta-server.outputs.bake-file }}
+            cwd://${{ steps.meta-agent.outputs.bake-file }}
+            cwd://${{ steps.meta-cli.outputs.bake-file }}
+          targets: server,agent,cli
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-          cache-from: type=gha,scope=lotsman-${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=lotsman-${{ matrix.target }}
-          provenance: false
+          set: |
+            *.args.VERSION=${{ steps.meta-server.outputs.version }}
+            *.cache-from=type=gha,scope=lotsman
+            *.cache-to=type=gha,mode=max,scope=lotsman
+            *.provenance=false
+
+      # Pull each just-pushed image (amd64 on this runner) and run its version
+      # command, so a broken image can never get tagged :latest / :edge.
+      - name: Smoke test images
+        run: |
+          set -euo pipefail
+          owner="${{ github.repository_owner }}"
+          short="${GITHUB_SHA:0:7}"
+          for img in server agent cli; do
+            ref="ghcr.io/${owner}/lotsman-${img}:sha-${short}"
+            echo "::group::smoke ${img} (${ref})"
+            docker pull -q "$ref"
+            if [ "$img" = "cli" ]; then
+              out="$(docker run --rm "$ref" version)"
+            else
+              out="$(docker run --rm "$ref" --version)"
+            fi
+            echo "$out"
+            echo "$out" | grep -q "lotsman" || { echo "::error::smoke test failed for ${img}"; exit 1; }
+            echo "::endgroup::"
+          done
