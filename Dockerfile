@@ -2,9 +2,15 @@
 #   server  — control plane with the Next.js UI embedded
 #   agent   — in-cluster agent
 #   cli     — operator CLI
+#
+# Multi-arch is built by CROSS-COMPILING, not emulation: the heavy stages
+# (UI build + Go compile) are pinned to $BUILDPLATFORM so they always run
+# natively on the builder, and the Go toolchain cross-compiles to $TARGETARCH.
+# Only the tiny runtime stages below are built per target platform. This keeps
+# `linux/amd64,linux/arm64` builds fast (no QEMU emulation of compilers).
 
-# Stage 1: Build UI static export
-FROM node:26-alpine AS ui-builder
+# Stage 1: Build UI static export (arch-independent — runs natively).
+FROM --platform=$BUILDPLATFORM node:26-alpine AS ui-builder
 WORKDIR /app
 COPY ui/package*.json ./
 # package-lock.json is committed, so use `npm ci` for reproducible builds.
@@ -13,8 +19,8 @@ COPY ui/ .
 RUN npm run build
 # Output: /app/out/
 
-# Stage 2: Build Go binaries with embedded UI
-FROM golang:1.26-alpine AS builder
+# Stage 2: Build Go binaries with embedded UI (runs natively, cross-compiles).
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 WORKDIR /app
 COPY go.mod ./
 COPY go.sum ./
@@ -27,9 +33,14 @@ RUN rm -rf ./internal/ui/dist && mkdir -p ./internal/ui/dist
 COPY --from=ui-builder /app/out/ ./internal/ui/dist/
 
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o /lotsman-server ./cmd/server
-RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o /lotsman-agent ./cmd/agent
-RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o /lotsman ./cmd/lotsman
+# TARGETOS/TARGETARCH are provided automatically by BuildKit per requested
+# platform; CGO is off so this is a pure cross-compile (no emulation needed).
+ARG TARGETOS
+ARG TARGETARCH
+ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
+RUN go build -ldflags="-s -w -X main.version=${VERSION}" -o /lotsman-server ./cmd/server
+RUN go build -ldflags="-s -w -X main.version=${VERSION}" -o /lotsman-agent ./cmd/agent
+RUN go build -ldflags="-s -w -X main.version=${VERSION}" -o /lotsman ./cmd/lotsman
 
 # Control-plane image (includes embedded UI)
 FROM alpine:3.24 AS server
