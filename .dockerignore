@@ -1,0 +1,9 @@
+.git
+.gitignore
+bin/
+ui/node_modules/
+ui/.next/
+ui/out/
+docs/
+*.md
+.DS_Store

@@ -1,0 +1,19 @@
+<!doctype html>
+<!--
+  Placeholder so `//go:embed all:dist` always has a file to embed and the Go
+  binary builds before any UI build has run.
+
+  In production the Dockerfile replaces this directory with the Next.js static
+  export (`ui/` -> `next build` -> `out/` -> copied here). In local dev, run the
+  UI with `cd ui && npm run dev` (Next.js dev server on :3000) and the Go API on
+  :8080; the dev server proxies/points at the API via NEXT_PUBLIC_API_URL.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Lotsman</title>
+  </head>
+  <body>
+    <p>Lotsman control plane is running. The UI bundle has not been built into this binary yet.</p>
+  </body>
+</html>

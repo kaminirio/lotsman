@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lotsman-agent
+  namespace: lotsman
+  labels:
+    app: lotsman-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lotsman-agent
+  template:
+    metadata:
+      labels:
+        app: lotsman-agent
+    spec:
+      serviceAccountName: lotsman-agent
+      containers:
+        - name: agent
+          image: lotsman-agent:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: LOTSMAN_CONTROL_PLANE_ADDR
+              value: "lotsman-control-plane.lotsman.svc:9090"
+            - name: LOTSMAN_CLUSTER
+              value: "local"
+            - name: LOTSMAN_AGENT_TOKEN
+              value: "dev-token"
+            - name: LOTSMAN_LOKI_URL
+              value: "http://loki.monitoring.svc:3100"
+            - name: LOTSMAN_VICTORIA_URL
+              value: "http://victoriametrics.monitoring.svc:8428"
+            - name: LOTSMAN_ARGOCD_URL
+              value: "http://argocd-server.argocd.svc"
+            # LOTSMAN_ARGOCD_TOKEN injected later via patch if argocd-server needs auth.
+            # LOTSMAN_KUBECONFIG unset -> in-cluster config for the kubernetes adapter.

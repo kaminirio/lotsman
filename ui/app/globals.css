@@ -1,0 +1,157 @@
+@import "tailwindcss";
+
+/* Warm Operator design language (ADR-0006).
+   Plus Jakarta Sans (UI) + JetBrains Mono (data). */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* ---------------------------------------------------------------------------
+   Tailwind v4 palette override:
+     - slate  → neutral near-black "console" scale
+     - indigo → brighter "iris" brand accent ramp
+   Semantic palettes (emerald/red/amber/sky/...) keep Tailwind defaults.
+--------------------------------------------------------------------------- */
+@theme {
+  --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+  --color-slate-50:  #fbfbfc;
+  --color-slate-100: #f4f4f6;
+  --color-slate-200: #e4e4e9;
+  --color-slate-300: #cacace;
+  --color-slate-400: #9b9ba6;
+  --color-slate-500: #7d7d88;
+  --color-slate-600: #565660;
+  --color-slate-700: #34343c;
+  --color-slate-800: #232429;
+  --color-slate-900: #141519;
+  --color-slate-950: #0b0c0f;
+
+  --color-indigo-200: #c8c0fb;
+  --color-indigo-300: #ab9ef9;
+  --color-indigo-400: #9685f7;
+  --color-indigo-500: #7c6cf6;
+  --color-indigo-600: #6a57f0;
+  --color-indigo-700: #5a46e0;
+}
+
+:root {
+  --bg-deep: #08090b;
+  --bg-base: #0b0c0f;
+  --bg-surface: #141519;
+  --bg-elevated: #1b1c21;
+  --bg-hover: #1f2027;
+  --surface: #141519;
+  --surface-2: #1b1c21;
+  --surface-hover: #1f2027;
+
+  --border: #232429;
+  --border-strong: #2c2d34;
+  --border-subtle: #18191e;
+
+  --text-primary: #f4f4f6;
+  --text-secondary: #a1a1aa;
+  --text-muted: #7d7d88;
+  --text-faint: #565660;
+
+  --accent: #7c6cf6;
+  --accent-hover: #8f80f8;
+  --accent-soft: rgba(124, 108, 246, 0.12);
+  --accent-glow: rgba(124, 108, 246, 0.28);
+
+  --healthy: #22c55e;
+  --healthy-bg: rgba(34, 197, 94, 0.08);
+  --degraded: #ef4444;
+  --degraded-bg: rgba(239, 68, 68, 0.08);
+  --progressing: #0ea5e9;
+  --progressing-bg: rgba(14, 165, 233, 0.08);
+  --warning: #f59e0b;
+  --warning-bg: rgba(245, 158, 11, 0.08);
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 1px rgba(0, 0, 0, 0.25);
+  --shadow-elevated: 0 12px 32px -10px rgba(0, 0, 0, 0.6), 0 2px 8px -4px rgba(0, 0, 0, 0.5);
+  --shadow-glow-accent: 0 4px 16px -4px var(--accent-glow);
+}
+
+html,
+body {
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(1100px 520px at 18% -8%, rgba(124, 108, 246, 0.06), transparent 60%),
+    radial-gradient(900px 480px at 100% 0%, rgba(124, 108, 246, 0.04), transparent 55%);
+}
+
+button:not(:disabled),
+[role='button']:not(:disabled),
+label[for],
+summary {
+  cursor: pointer;
+}
+
+.font-tech {
+  font-family: var(--font-mono);
+  font-feature-settings: 'tnum' 1, 'cv01' 1;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2c2d34 transparent;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  box-shadow: 0 0 0 1px rgba(124, 108, 246, 0.35), 0 0 14px -4px rgba(124, 108, 246, 0.25);
+}
+
+@keyframes attention-pulse {
+  0%, 100% { background-color: transparent; }
+  50% { background-color: rgba(239, 68, 68, 0.05); }
+}
+.row-attention { animation: attention-pulse 3s ease-in-out infinite; }
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-up { animation: fade-up 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+
+.stagger-children > * {
+  animation: fade-up 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  opacity: 0;
+}
+.stagger-children > *:nth-child(1) { animation-delay: 0ms; }
+.stagger-children > *:nth-child(2) { animation-delay: 40ms; }
+.stagger-children > *:nth-child(3) { animation-delay: 80ms; }
+.stagger-children > *:nth-child(4) { animation-delay: 120ms; }
+.stagger-children > *:nth-child(5) { animation-delay: 160ms; }
+.stagger-children > *:nth-child(6) { animation-delay: 200ms; }
+
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.pulse-slow { animation: status-pulse 2s ease-in-out infinite; }
+
+.shadow-card { box-shadow: var(--shadow-card); }
+.shadow-elevated { box-shadow: var(--shadow-elevated); }
+.glow-accent { box-shadow: var(--shadow-glow-accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up,
+  .stagger-children > * { animation: none; opacity: 1; transform: none; }
+  .row-attention { animation: none; }
+  .pulse-slow { animation: none; opacity: 1; }
+}

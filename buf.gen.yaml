@@ -1,0 +1,14 @@
+version: v2
+# Strip the module prefix from the go_package import path so generated files land
+# at internal/agentlink/pb/*.pb.go (the go_package is "lotsman/internal/agentlink/pb;pb").
+managed:
+  enabled: false
+plugins:
+  - local: protoc-gen-go
+    out: .
+    opt:
+      - module=lotsman
+  - local: protoc-gen-go-grpc
+    out: .
+    opt:
+      - module=lotsman

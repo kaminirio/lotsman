@@ -1,0 +1,100 @@
+# Second-cluster agent for validating Lotsman's multi-cluster features.
+#
+# This is applied to a SEPARATE k3d cluster (`lotsman2`). The agent dials OUT to
+# the control plane running in the FIRST cluster, reached on the host via
+# `host.k3d.internal:9090` (a `kubectl port-forward --address 0.0.0.0` of the
+# control-plane gateway Service exposes it to the host's docker bridge). It
+# registers as the logical cluster `local-2`, so the control plane's registry,
+# the /clusters list, and the UI cluster selector all show two real clusters.
+#
+# Loki/VictoriaMetrics/ArgoCD aren't deployed here, so those adapters degrade
+# gracefully; the Kubernetes adapter runs in-cluster and serves this cluster's
+# real nodes/pods/workloads/events/configmaps.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lotsman
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lotsman-agent
+  namespace: lotsman
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lotsman-agent
+rules:
+  - apiGroups: [""]
+    resources: ["events", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lotsman-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lotsman-agent
+subjects:
+  - kind: ServiceAccount
+    name: lotsman-agent
+    namespace: lotsman
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lotsman-agent
+  namespace: lotsman
+  labels:
+    app: lotsman-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lotsman-agent
+  template:
+    metadata:
+      labels:
+        app: lotsman-agent
+    spec:
+      serviceAccountName: lotsman-agent
+      containers:
+        - name: agent
+          image: lotsman-agent:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            # The control plane lives in the OTHER cluster (cluster1). Reach it
+            # via the gateway NodePort (svc/lotsman-gateway-np, 9090->30090) on the
+            # cluster1 *node* IP. This works when this cluster's node is attached
+            # to the same docker network as cluster1, so pods here egress onto that
+            # subnet via the node.
+            #   host.k3d.internal:9090 does NOT work — cluster1 only publishes 6443
+            #   on the host, not the gateway. The serverlb IP doesn't forward the
+            #   NodePort either; only the node IP does.
+            # NOTE: the node IP is environment-specific and can change if the cluster
+            #   is recreated — discover it with `docker inspect` of the cluster1
+            #   server node and set it below.
+            - name: LOTSMAN_CONTROL_PLANE_ADDR
+              value: "<CLUSTER1_NODE_IP>:30090"
+            - name: LOTSMAN_CLUSTER
+              value: "local-2"
+            - name: LOTSMAN_AGENT_TOKEN
+              value: "dev-token"

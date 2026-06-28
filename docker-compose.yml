@@ -1,0 +1,103 @@
+# Local Lotsman stack.
+#
+#   Core (default):   control plane (DIRECT mode, embedded UI) + Postgres.
+#                     Boots in seconds; serves the seeded sample incident.
+#                       docker compose up --build
+#                       open http://localhost:8080
+#
+#   Full telemetry:   adds Loki + VictoriaMetrics + a mock-ArgoCD/data
+#                     generator so a live investigation returns a REAL,
+#                     correlated, change-ranked incident.
+#                       docker compose --profile full up --build
+#                       curl -s localhost:8080/api/v1/incidents | jq    # seeded
+#                       curl -s -XPOST localhost:8080/api/v1/investigate \
+#                         -d '{"cluster":"local","namespace":"demo","kind":"Deployment","name":"checkout"}' | jq
+#
+# ArgoCD and the Kubernetes adapter normally need a real cluster; here the
+# `demo` service mocks the ArgoCD API and feeds Loki/VictoriaMetrics. The
+# Kubernetes adapter has no backend in compose and degrades gracefully.
+services:
+  control-plane:
+    build:
+      context: .
+      target: server
+      args:
+        VERSION: dev
+    ports:
+      - "8080:8080" # REST API + UI
+      - "9090:9090" # agent gateway (gRPC)
+    environment:
+      LOTSMAN_ADDR: ":8080"
+      LOTSMAN_GATEWAY_ADDR: ":9090"
+      LOTSMAN_DATABASE_URL: "postgres://lotsman:lotsman@postgres:5432/lotsman?sslmode=disable"
+      LOTSMAN_DIRECT_MODE: "1"
+      LOTSMAN_CLUSTER: "local"
+      # In core mode these hosts don't resolve and the adapters fail gracefully;
+      # under `--profile full` they point at the telemetry services below.
+      LOTSMAN_LOKI_URL: "http://loki:3100"
+      LOTSMAN_VICTORIA_URL: "http://victoriametrics:8428"
+      LOTSMAN_ARGOCD_URL: "http://demo:8081"
+      LOTSMAN_ARGOCD_TOKEN: "local-demo-token"
+    depends_on:
+      - postgres # only postgres, so a core `up` doesn't pull in the full profile
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: lotsman
+      POSTGRES_PASSWORD: lotsman
+      POSTGRES_DB: lotsman
+    # Not published to the host: the control plane reaches it over the compose
+    # network as `postgres:5432`, and publishing collides with a local Postgres.
+    # Add `ports: ["5433:5432"]` if you want to connect from the host.
+    volumes:
+      - lotsman-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lotsman"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---- Full-telemetry profile ------------------------------------------- #
+  loki:
+    image: grafana/loki:3.0.0
+    profiles: ["full"]
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./deploy/local/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - lotsman-loki:/loki
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.97.1
+    profiles: ["full"]
+    command:
+      - "-storageDataPath=/vmdata"
+      - "-retentionPeriod=1d"
+      - "-search.latencyOffset=1s"
+    ports:
+      - "8428:8428"
+    volumes:
+      - lotsman-vmdata:/vmdata
+
+  demo:
+    build:
+      context: ./deploy/local/demo
+    profiles: ["full"]
+    environment:
+      LOKI_URL: "http://loki:3100"
+      VICTORIA_URL: "http://victoriametrics:8428"
+      ARGOCD_PORT: "8081"
+      DEMO_NS: "demo"
+      DEMO_APP: "checkout"
+    ports:
+      - "8081:8081" # mock ArgoCD API (handy for poking directly)
+    depends_on:
+      - loki
+      - victoriametrics
+
+volumes:
+  lotsman-pgdata:
+  lotsman-loki:
+  lotsman-vmdata:

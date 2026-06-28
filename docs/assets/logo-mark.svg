@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none" role="img" aria-label="Lotsman logo">
+  <defs>
+    <linearGradient id="m-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1c26"/>
+      <stop offset="1" stop-color="#0a0b0e"/>
+    </linearGradient>
+    <linearGradient id="m-needle" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9685f7"/>
+      <stop offset="0.55" stop-color="#7c6cf6"/>
+      <stop offset="1" stop-color="#6a57f0"/>
+    </linearGradient>
+    <radialGradient id="m-glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#7c6cf6" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#7c6cf6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- tile -->
+  <rect x="0" y="0" width="256" height="256" rx="56" fill="url(#m-bg)"/>
+  <rect x="1.5" y="1.5" width="253" height="253" rx="54.5" fill="none" stroke="#7c6cf6" stroke-opacity="0.22" stroke-width="1"/>
+
+  <!-- accent glow -->
+  <circle cx="128" cy="128" r="84" fill="url(#m-glow)"/>
+
+  <!-- radar rings -->
+  <circle cx="128" cy="128" r="58" fill="none" stroke="#f4f4f6" stroke-opacity="0.06" stroke-width="1.5"/>
+  <g transform="rotate(-14 128 128)">
+    <circle cx="128" cy="128" r="82" fill="none" stroke="#7c6cf6" stroke-opacity="0.5" stroke-width="3" stroke-linecap="round" stroke-dasharray="96 33"/>
+  </g>
+
+  <!-- cardinal marks -->
+  <g fill="#f4f4f6" fill-opacity="0.45">
+    <circle cx="128" cy="46" r="2.6"/>
+    <circle cx="210" cy="128" r="2.6"/>
+    <circle cx="128" cy="210" r="2.6"/>
+    <circle cx="46" cy="128" r="2.6"/>
+  </g>
+
+  <!-- "located cause" connector -->
+  <line x1="128" y1="128" x2="186" y2="70" stroke="#f59e0b" stroke-opacity="0.5" stroke-width="2" stroke-linecap="round" stroke-dasharray="2 6"/>
+
+  <!-- compass needle -->
+  <path d="M128 44 L148 128 L108 128 Z" fill="url(#m-needle)"/>
+  <path d="M128 212 L148 128 L108 128 Z" fill="#34343c"/>
+
+  <!-- hub -->
+  <circle cx="128" cy="128" r="13" fill="#0b0c0f" stroke="#7c6cf6" stroke-width="3"/>
+  <circle cx="128" cy="128" r="3.2" fill="#8f80f8"/>
+
+  <!-- located cause blip -->
+  <circle cx="186" cy="70" r="12" fill="#f59e0b" fill-opacity="0.18"/>
+  <circle cx="186" cy="70" r="6" fill="#f59e0b"/>
+  <circle cx="186" cy="70" r="2.1" fill="#fffaf0"/>
+</svg>

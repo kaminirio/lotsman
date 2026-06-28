@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package lotsman.v1;
+
+option go_package = "lotsman/internal/agentlink/pb;pb";
+
+import "google/protobuf/timestamp.proto";
+
+// AgentService is the bidirectional contract between an in-cluster agent and the
+// control plane (ADR-0001, ADR-0002). The agent dials OUT and opens a single
+// long-lived Connect stream, secured with mTLS. Over that one stream:
+//   - the control plane sends Query requests; the agent replies with QueryResult;
+//   - the agent pushes watch Events (Kubernetes / ArgoCD) at any time.
+//
+// This file is the design source of truth for internal/agentlink. Generate Go
+// types with protoc/buf when wiring the transport:
+//   buf generate   (or)   protoc --go_out=. --go-grpc_out=. proto/lotsman.proto
+service AgentService {
+  rpc Connect(stream AgentMessage) returns (stream ControlPlaneMessage);
+}
+
+// ---- agent -> control plane ----
+
+message AgentMessage {
+  oneof payload {
+    Hello hello = 1;        // sent once on connect (enrollment + capabilities)
+    QueryResult result = 2; // reply to a Query, correlated by request_id
+    Event event = 3;        // pushed watch event
+    Heartbeat heartbeat = 4;
+  }
+}
+
+message Hello {
+  string cluster = 1;
+  string agent_version = 2;
+  string token = 3;                 // enrollment token (mTLS carries identity in prod)
+  repeated string capabilities = 4; // "loki", "victoriametrics", "argocd", "kubernetes"
+}
+
+message QueryResult {
+  string request_id = 1;
+  bytes payload = 2; // JSON-encoded source result
+  string error = 3;  // non-empty on failure
+}
+
+message Heartbeat { google.protobuf.Timestamp at = 1; }
+
+// ---- control plane -> agent ----
+
+message ControlPlaneMessage {
+  oneof payload {
+    Query query = 1;
+  }
+}
+
+message Query {
+  string request_id = 1;
+  RequestKind kind = 2;
+  bytes payload = 3; // JSON-encoded source query
+}
+
+enum RequestKind {
+  REQUEST_KIND_UNSPECIFIED = 0;
+  QUERY_LOGS = 1;
+  QUERY_METRICS_INSTANT = 2;
+  QUERY_METRICS_RANGE = 3;
+  CHANGE_EVENTS = 4;
+  K8S_EVENTS = 5;
+  LIST_WORKLOADS = 6;
+  LIST_PODS = 7;
+  POD_LOGS = 8;
+  LIST_CONFIGMAPS = 9;
+  GET_CONFIGMAP = 10;
+  LIST_SECRETS = 11;
+  GET_SECRET = 12;
+  LIST_NODES = 13;
+  WORKLOAD_HISTORY = 14;
+}
+
+// Event is a server-pushed signal normalized to a resource + time. The signal
+// field is a JSON-encoded model.Signal.
+message Event {
+  string cluster = 1;
+  bytes signal = 2;
+}

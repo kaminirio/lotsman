@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 240" width="900" height="240" fill="none" role="img" aria-label="Lotsman — Kubernetes incident investigation">
+  <defs>
+    <linearGradient id="l-panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14161f"/>
+      <stop offset="1" stop-color="#0a0b0e"/>
+    </linearGradient>
+    <linearGradient id="l-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1c26"/>
+      <stop offset="1" stop-color="#0a0b0e"/>
+    </linearGradient>
+    <linearGradient id="l-needle" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9685f7"/>
+      <stop offset="0.55" stop-color="#7c6cf6"/>
+      <stop offset="1" stop-color="#6a57f0"/>
+    </linearGradient>
+    <radialGradient id="l-glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#7c6cf6" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#7c6cf6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- panel -->
+  <rect x="0.5" y="0.5" width="899" height="239" rx="32" fill="url(#l-panel)" stroke="#232429" stroke-width="1"/>
+  <rect x="32" y="20" width="836" height="2" rx="1" fill="#7c6cf6" fill-opacity="0.35"/>
+
+  <!-- mark -->
+  <g transform="translate(48 40) scale(0.625)">
+    <rect x="0" y="0" width="256" height="256" rx="56" fill="url(#l-bg)"/>
+    <rect x="1.5" y="1.5" width="253" height="253" rx="54.5" fill="none" stroke="#7c6cf6" stroke-opacity="0.22" stroke-width="1.6"/>
+    <circle cx="128" cy="128" r="84" fill="url(#l-glow)"/>
+    <circle cx="128" cy="128" r="58" fill="none" stroke="#f4f4f6" stroke-opacity="0.06" stroke-width="2"/>
+    <g transform="rotate(-14 128 128)">
+      <circle cx="128" cy="128" r="82" fill="none" stroke="#7c6cf6" stroke-opacity="0.5" stroke-width="4" stroke-linecap="round" stroke-dasharray="96 33"/>
+    </g>
+    <g fill="#f4f4f6" fill-opacity="0.45">
+      <circle cx="128" cy="46" r="3"/>
+      <circle cx="210" cy="128" r="3"/>
+      <circle cx="128" cy="210" r="3"/>
+      <circle cx="46" cy="128" r="3"/>
+    </g>
+    <line x1="128" y1="128" x2="186" y2="70" stroke="#f59e0b" stroke-opacity="0.5" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="2 6"/>
+    <path d="M128 44 L148 128 L108 128 Z" fill="url(#l-needle)"/>
+    <path d="M128 212 L148 128 L108 128 Z" fill="#34343c"/>
+    <circle cx="128" cy="128" r="13" fill="#0b0c0f" stroke="#7c6cf6" stroke-width="3.5"/>
+    <circle cx="128" cy="128" r="3.4" fill="#8f80f8"/>
+    <circle cx="186" cy="70" r="12" fill="#f59e0b" fill-opacity="0.18"/>
+    <circle cx="186" cy="70" r="6.5" fill="#f59e0b"/>
+    <circle cx="186" cy="70" r="2.3" fill="#fffaf0"/>
+  </g>
+
+  <!-- wordmark -->
+  <g font-family="'Plus Jakarta Sans', 'Segoe UI', system-ui, -apple-system, Helvetica, Arial, sans-serif">
+    <text x="252" y="76" font-size="15" font-weight="600" letter-spacing="3.5" fill="#7c6cf6">KUBERNETES INCIDENT INVESTIGATION</text>
+    <text x="250" y="142" font-size="88" font-weight="700" letter-spacing="-3" fill="#f4f4f6">Lotsman</text>
+    <text x="252" y="184" font-size="24" font-weight="500" letter-spacing="-0.2" fill="#a1a1aa">Find the cause<tspan fill="#565660"> — </tspan>not just the symptom.</text>
+  </g>
+</svg>

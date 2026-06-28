@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lotsman-agent
+  namespace: lotsman
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lotsman-agent
+rules:
+  - apiGroups: [""]
+    resources: ["events", "pods"]
+    verbs: ["get", "list", "watch"]
+  # Cluster-scoped Node inspection (Lens-style "Nodes" view). Node objects carry
+  # status/roles/version/capacity only — no secret data — so this read is safe in
+  # the base role.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Pod log streaming for the pod-inspection feature.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  # ReplicaSet get resolves a pod's owning Deployment (Pod -> ReplicaSet ->
+  # Deployment) for the pod-inspection Owner column. List is also needed to
+  # reconstruct a Deployment's image/tag history from its revision ReplicaSets.
+  # Low-risk read of metadata.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  # ConfigMaps are not secret, so the ConfigMap browser (list + view) is granted
+  # in the base role. Secret VALUES remain opt-in (see below / the reveal overlay).
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  # NOTE: secrets get/list is intentionally NOT granted here. Reading Secret
+  # *values* cluster-wide (admin env-reveal AND the Secrets/Certificates browser)
+  # materially widens the agent's blast radius. That grant is opt-in and lives in
+  # 21-agent-rbac-reveal.yaml — apply it ONLY in trusted single-tenant clusters
+  # and pair it with LOTSMAN_ALLOW_ENV_REVEAL=1 on the agent.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lotsman-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lotsman-agent
+subjects:
+  - kind: ServiceAccount
+    name: lotsman-agent
+    namespace: lotsman

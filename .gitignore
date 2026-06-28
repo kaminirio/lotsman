@@ -1,0 +1,18 @@
+/bin
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local
+.env.*.local
+
+# The UI export is copied in at image-build time; keep the dir + placeholder only.
+/internal/ui/dist/*
+!/internal/ui/dist/index.html
+
+# Python
+__pycache__/
+*.pyc
+
+# Local agent/assistant config and private dev instructions (not for the public repo).
+/.claude/
+/CLAUDE.md

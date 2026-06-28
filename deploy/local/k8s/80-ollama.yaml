@@ -1,0 +1,76 @@
+# OPTIONAL CPU LLM explainer backend.
+#
+# This is the off-by-default LLM incident-explainer runtime: a self-hosted Ollama
+# server that the control plane calls (over LOTSMAN_LLM_URL) to turn an already-
+# correlated incident's GROUNDED findings into a plain-English root-cause
+# narrative + triage label. It is assistive only and never on the detection hot
+# path; if this Deployment is absent or not ready, the control plane simply
+# returns 503 from POST /api/v1/incidents/{id}/explain and is otherwise unaffected.
+#
+# The model is NOT baked into the image — it is pulled separately after rollout
+# (the deploy stage runs: `kubectl exec deploy/ollama -n lotsman -- ollama pull gemma3:4b`).
+# gemma3:4b at Q4 needs ~3.5GB resident, so resources are sized generously for CPU
+# inference. Model storage uses an emptyDir here (re-pulled if the pod restarts);
+# switch the volume to a PersistentVolumeClaim to keep the pulled model across
+# restarts.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: lotsman
+  labels:
+    app: ollama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 11434
+          resources:
+            requests:
+              # gemma3:4b Q4 needs ~3.5GB resident; request 4Gi headroom + 2 cores.
+              memory: 4Gi
+              cpu: "2"
+            limits:
+              memory: 6Gi
+              cpu: "4"
+          volumeMounts:
+            # Model store. emptyDir => model is re-pulled on pod restart. For
+            # persistence across restarts, replace with a PVC of >=10Gi.
+            - name: models
+              mountPath: /root/.ollama
+          readinessProbe:
+            # TCP on 11434 is sufficient: the API root is up once the server binds.
+            tcpSocket:
+              port: 11434
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: models
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: lotsman
+  labels:
+    app: ollama
+spec:
+  selector:
+    app: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: 11434

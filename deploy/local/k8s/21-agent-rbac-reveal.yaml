@@ -1,0 +1,48 @@
+# ============================================================================
+# ⚠️  OPT-IN ENV-REVEAL GRANT — DO NOT APPLY BY DEFAULT  ⚠️
+# ============================================================================
+# This manifest grants the lotsman-agent ServiceAccount cluster-wide `get` AND
+# `list` on Secrets. It powers two capabilities:
+#   1. The admin "reveal resolved env" feature in the pod-inspection UI
+#      (resolving valueFrom: secretKeyRef to actual values) — needs `get`.
+#   2. The Secrets / Certificates browser (list Secrets, view one Secret's
+#      entries, parse TLS certificate metadata) — needs `list` + `get`.
+# (ConfigMap browsing needs no grant here — configmaps get/list lives in the
+# base role 20-agent-rbac.yaml since ConfigMap values are not secret.)
+#
+# CONSEQUENCE: with this applied, ANYONE who compromises the agent
+# ServiceAccount (or the agent pod) can read EVERY Secret in the cluster.
+# This is a cluster-wide credential-exfiltration blast radius.
+#
+# APPLY ONLY IF ALL of the following hold:
+#   1. The cluster is trusted and SINGLE-TENANT.
+#   2. You actually need admins to reveal resolved secret env values in the UI.
+#   3. You ALSO set LOTSMAN_ALLOW_ENV_REVEAL=1 on the agent Deployment
+#      (21-agent.yaml). Without that env flag the agent ignores the wire Reveal
+#      flag and never resolves secrets, so this RBAC grant alone does nothing.
+#
+# WITHOUT this manifest (the default), Secret/ConfigMap-sourced env values are
+# shown as references only (chip with name + source), never their values.
+# Inline literal env values are still masked for non-admins regardless.
+# ============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lotsman-agent-env-reveal
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lotsman-agent-env-reveal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lotsman-agent-env-reveal
+subjects:
+  - kind: ServiceAccount
+    name: lotsman-agent
+    namespace: lotsman

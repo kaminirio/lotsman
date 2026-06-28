@@ -1,0 +1,121 @@
+# VictoriaMetrics single-node. Scrapes itself plus any pod annotated
+# prometheus.io/scrape=true via kubernetes_sd. The metric adapter is exercised
+# by the engine's MetricDetector (scheduler path), not the investigate timeline,
+# so validation here = VM returns data via /api/v1/query AND the agent reaches VM
+# without connection errors.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: victoriametrics
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: victoriametrics
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/metrics", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: victoriametrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: victoriametrics
+subjects:
+  - kind: ServiceAccount
+    name: victoriametrics
+    namespace: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: victoriametrics-scrape
+  namespace: monitoring
+data:
+  scrape.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: victoriametrics-self
+        static_configs:
+          - targets: ["localhost:8428"]
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: app
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victoriametrics
+  namespace: monitoring
+  labels:
+    app: victoriametrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: victoriametrics
+  template:
+    metadata:
+      labels:
+        app: victoriametrics
+    spec:
+      serviceAccountName: victoriametrics
+      containers:
+        - name: victoriametrics
+          image: victoriametrics/victoria-metrics:v1.97.1
+          imagePullPolicy: IfNotPresent
+          args:
+            - -storageDataPath=/vmdata
+            - -promscrape.config=/etc/vm/scrape.yml
+            - -httpListenAddr=:8428
+          ports:
+            - name: http
+              containerPort: 8428
+          volumeMounts:
+            - name: scrape
+              mountPath: /etc/vm
+            - name: data
+              mountPath: /vmdata
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: scrape
+          configMap:
+            name: victoriametrics-scrape
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoriametrics
+  namespace: monitoring
+  labels:
+    app: victoriametrics
+spec:
+  selector:
+    app: victoriametrics
+  ports:
+    - name: http
+      port: 8428
+      targetPort: 8428
