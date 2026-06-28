@@ -32,20 +32,20 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o /lotsm
 RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o /lotsman ./cmd/lotsman
 
 # Control-plane image (includes embedded UI)
-FROM alpine:3.21 AS server
+FROM alpine:3.24 AS server
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /lotsman-server /usr/local/bin/lotsman-server
 EXPOSE 8080 9090
 ENTRYPOINT ["lotsman-server"]
 
 # Agent image
-FROM alpine:3.21 AS agent
+FROM alpine:3.24 AS agent
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /lotsman-agent /usr/local/bin/lotsman-agent
 ENTRYPOINT ["lotsman-agent"]
 
 # CLI image
-FROM alpine:3.21 AS cli
+FROM alpine:3.24 AS cli
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /lotsman /usr/local/bin/lotsman
 ENTRYPOINT ["lotsman"]
