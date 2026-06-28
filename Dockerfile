@@ -4,7 +4,7 @@
 #   cli     — operator CLI
 
 # Stage 1: Build UI static export
-FROM node:22-alpine AS ui-builder
+FROM node:26-alpine AS ui-builder
 WORKDIR /app
 COPY ui/package*.json ./
 # package-lock.json is committed, so use `npm ci` for reproducible builds.
