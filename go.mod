@@ -1,6 +1,6 @@
 module lotsman
 
-go 1.26.0
+go 1.26.5
 
 // The control plane and agent are implemented and wired; these direct
 // dependencies back the concrete adapters and infrastructure:
