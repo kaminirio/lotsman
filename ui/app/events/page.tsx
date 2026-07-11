@@ -5,6 +5,7 @@ import { listEvents, type Signal } from '@/lib/api'
 import { useCluster } from '@/lib/cluster-context'
 import { ResourceToolbar } from '@/components/resource-toolbar'
 import { LoadingState, ErrorState, EmptyState } from '@/components/view-states'
+import { useLivePoll } from '@/lib/use-live'
 import {
   denseTableCls,
   denseThRowCls,
@@ -47,6 +48,9 @@ export default function EventsPage() {
     const cancel = load()
     return cancel
   }, [load])
+
+  // Events have no SSE stream; auto-refresh on a visibility-aware interval.
+  useLivePoll(() => setNonce((n) => n + 1), { enabled: !!cluster })
 
   const discoveredNamespaces = useMemo(
     () => events.map((e) => e.resource.namespace).filter((n): n is string => !!n),

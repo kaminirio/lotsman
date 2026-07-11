@@ -13,10 +13,16 @@ import (
 // are on) before falling back to `index.html` for client-only routes. Without
 // the per-route resolution every non-asset path served index.html, so every
 // page looked identical.
+//
+// If the embedded export cannot be resolved (a build without the UI embedded),
+// Handler degrades gracefully: rather than panic at startup it returns a handler
+// that reports the failure with 500 on every request, so the API keeps serving.
 func Handler() http.Handler {
 	sub, err := fs.Sub(Files, "dist")
 	if err != nil {
-		panic(err)
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "ui: embedded assets unavailable", http.StatusInternalServerError)
+		})
 	}
 	fileServer := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

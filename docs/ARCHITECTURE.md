@@ -7,9 +7,9 @@ metrics, and deployment/change events on one resource timeline and ranking the
 *probable cause* of an incident.
 
 This document is the system design. Per-decision rationale lives in
-[`adr/`](adr/). The repository is a compiling **scaffold**: the structure, the
-interfaces, and the engine wiring are real; concrete adapters, the gRPC transport,
-and the Postgres store are stubbed with `TODO(impl)` markers.
+[`adr/`](adr/). The structure, the interfaces, the engine, the concrete adapters,
+the gRPC transport, the Postgres store, the detector scheduler, and auth are all
+implemented and covered by tests; §12 tracks the work that genuinely remains.
 
 ---
 
@@ -87,11 +87,11 @@ difference because both modes resolve to the same `sources.Provider` interface
 | Component | Package | Responsibility |
 |-----------|---------|----------------|
 | **Agent** | `internal/agent` | Runs in a cluster. Builds concrete adapters, dials the control plane, serves proxied queries, pushes k8s/ArgoCD watch events. |
-| **Agent link** | `internal/agentlink` | Transport-agnostic contract for the agent↔control-plane channel. Wire impl: gRPC bidi stream + mTLS (`proto/lotsman.proto`). |
+| **Agent link** | `internal/agentlink` | Transport-agnostic contract for the agent↔control-plane channel. Wire impl: gRPC bidi stream (`proto/lotsman.proto`); mTLS planned (§12). |
 | **Cluster registry** | `internal/controlplane` | Maps a cluster → its `Provider` (direct or remote). Implements `engine.ProviderResolver`. |
 | **Sources** | `internal/sources` | The four neutral interfaces + concrete adapters (`loki`, `victoriametrics`, `argocd`, `kubernetes`) + `remote` proxy. |
 | **Engine** | `internal/engine` | Detectors → correlator → ranker. Builds incidents and ranks causes. |
-| **Store** | `internal/store` | Persists incidents, change history, clusters, config. In-memory now; Postgres planned. |
+| **Store** | `internal/store` | Persists incidents, change history, clusters, config. Postgres (pgx) when `DatabaseURL` is set; in-memory otherwise. |
 | **API** | `internal/api` | REST for the UI + SSE for live updates + serves the embedded UI. |
 | **UI** | `ui/` | Next.js operator app (incidents, timeline, clusters). |
 
@@ -147,7 +147,8 @@ The engine is the product. It has three stages over the neutral signal stream.
 
 - **Detectors** (`engine/detector`) — cheap, pluggable conditions that *open*
   candidate incidents: error-level Kubernetes events, a PromQL threshold breach
-  (e.g. 5xx rate), a log-error burst. A scheduler (future) runs these per cluster.
+  (e.g. 5xx rate), a log-error burst. A scheduler runs these per cluster on a poll
+  loop (`internal/controlplane/scheduler.go`).
 - **Correlator** (`engine/correlator.go`) — given a resource + time window, gather
   signals from **all** sources and merge them into one time-sorted timeline. It is
   failure-tolerant: a Loki outage degrades the timeline but never blinds the rest.
@@ -212,8 +213,9 @@ These types are deliberately free of any backend or transport import.
 ## 7. Agent ↔ control-plane link
 
 Contract: [`proto/lotsman.proto`](../proto/lotsman.proto). One long-lived **gRPC
-bidirectional stream** per agent, secured with **mTLS** (ADR-0002). The agent dials
-out and the stream multiplexes:
+bidirectional stream** per agent. Identity is currently a shared enrollment token;
+**mTLS** (ADR-0002) is the planned transport security and the gateway/dialer already
+carry the seams for it (§12). The agent dials out and the stream multiplexes:
 
 - **down** (control plane → agent): `Query` requests (proxied source calls);
 - **up** (agent → control plane): `QueryResult` replies, pushed `Event`s from
@@ -239,9 +241,10 @@ own derived state, in **PostgreSQL** (pgx):
   durable);
 - clusters/agents, users/sessions, RBAC, configuration.
 
-The scaffold ships an in-memory `store.Memory` with seed data; the Postgres
-implementation slots in behind the same `store.Store` interface. The `Cluster`
-record (env/region metadata) is designed for long-term schema stability.
+Both an in-memory `store.Memory` (with seed data) and a Postgres implementation
+(pgx pool + embedded migrations) sit behind the same `store.Store` interface; the
+Postgres path is auto-selected when `DatabaseURL` is set. The `Cluster` record
+(env/region metadata) is designed for long-term schema stability.
 
 ---
 
@@ -251,7 +254,7 @@ record (env/region metadata) is designed for long-term schema stability.
   Shutdown`. Routes: `/healthz`, `/api/v1/version`,
   `/api/v1/incidents[/{id}]`, `/api/v1/investigate`, `/api/v1/clusters`,
   `/api/v1/stream` (SSE), `/auth/*`, and a catch-all serving the embedded UI.
-- **UI** (`ui/`) — Next.js 15 + React 19 + TypeScript + Tailwind v4, **static
+- **UI** (`ui/`) — Next.js 16 + React 19 + TypeScript + Tailwind v4, **static
   export embedded into the Go binary** via `//go:embed` (single-binary deploy).
   Uses the "Warm Operator" design system, `apiFetch` client pattern, and
   auth context (ADR-0006).
@@ -260,8 +263,8 @@ record (env/region metadata) is designed for long-term schema stability.
 
 ## 10. Security, multi-tenancy, multi-cluster
 
-- **Agent identity:** mTLS client certs; the enrollment `token` bootstraps the
-  first connection. Agents are egress-only; clusters expose nothing inbound.
+- **Agent identity:** a shared enrollment `token` today; mTLS client certs are the
+  planned end state (§12). Agents are egress-only; clusters expose nothing inbound.
 - **User auth:** GitHub OAuth + JWT session cookies (HttpOnly), with a structured
   SSO config (ADR-0007). RBAC scopes visibility to clusters/namespaces.
 - **Multi-cluster** is native: the registry keys everything by cluster, and
@@ -288,19 +291,42 @@ is introduced. The intended path:
 
 ## 12. Status & roadmap
 
-**Working now:** compiles (`go build ./...`), runs in direct mode with seed data,
-serves the full incident timeline + ranked hypotheses over REST, SPA fallback for
-the UI.
+Lotsman is pre-1.0, but the core is built, wired, and tested (313 tests across 25
+packages).
 
-**Stubbed (`TODO(impl)`), in priority order:**
+**Working now:**
 
-1. Concrete adapters — `kubernetes` (client-go informers), `victoriametrics`
-   (PromQL), `loki` (LogQL), `argocd` (change events). This lights up direct mode
-   against a real cluster.
-2. Postgres store (pgx) behind `store.Store`.
-3. gRPC transport for `agentlink` (gateway/dialer) from `proto/lotsman.proto`;
-   then multi-cluster agent mode.
-4. Detector scheduler + SSE incident bus for continuous, live incidents.
-5. Auth (GitHub OAuth + JWT + RBAC).
+- **Concrete adapters** — `kubernetes` (client-go, all `ClusterSource` methods),
+  `victoriametrics` (PromQL), `loki` (LogQL), `argocd` (change events over REST).
+  Direct mode runs against a real cluster.
+- **Postgres store** (pgx pool + embedded migrations) behind `store.Store`,
+  auto-selected when `DatabaseURL` is set; in-memory store with seed data otherwise.
+- **gRPC agentlink** — gateway + dialer from `proto/lotsman.proto`, enrollment-token
+  auth, keepalive/reconnect, all 14 request kinds; multi-cluster agent mode and the
+  `sources/remote` proxy work end to end.
+- **Detector scheduler + SSE incident bus** — the scheduler polls per cluster and
+  fans incidents out to the live event stream.
+- **Auth** — GitHub OAuth + JWT sessions + config-driven RBAC, enforced on every
+  handler.
+- Compiles (`go build ./...`), serves the full incident timeline + ranked hypotheses
+  over REST, and serves the embedded UI with SPA fallback.
+
+**Remaining work (the real roadmap), roughly in priority order:**
+
+1. **Agentlink mTLS.** The transport is plaintext today with a shared enrollment
+   token for identity; the gateway/dialer have explicit `insecure` seams. Add mTLS /
+   per-cluster identity (ADR-0002).
+2. **Wire the watch-event push path end to end.** The push infrastructure exists
+   (dialer event feed, gateway dispatch, `Link.Events()`) but the agent never starts
+   a watch and nothing drains the stream, so detection is poll-only.
+3. **Metrics in the correlation timeline.** The correlator gathers logs, deployments,
+   and Kube events; `MetricSource` is not yet queried, so metric anomalies never reach
+   the timeline or ranker.
+4. **CLI** (`cmd/lotsman`) — currently a version-only stub; build out the real
+   command surface.
+5. **Helm chart / production manifests** — only dev-flavored local manifests exist
+   today.
+6. **Richer ranker heuristics** — the ranker is change-first but thin (deploy-before-
+   incident + OOM/evicted); add log-burst / metric-anomaly hypotheses.
 
 See [`adr/`](adr/) for the decisions behind all of the above.

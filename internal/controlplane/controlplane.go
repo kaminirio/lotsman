@@ -55,6 +55,12 @@ func New(ctx context.Context, cfg config.Server, logger *slog.Logger) (*ControlP
 
 	registry := NewRegistry()
 	registry.logger = logger
+	// Bound every per-agent drain goroutine by the control-plane lifecycle ctx (the
+	// signal-notify context from cmd/server, cancelled on SIGINT/SIGTERM). Without
+	// this the backstop is inert in prod — NewRegistry defaults drainCtx to
+	// context.Background(), so drains would only exit on link close. They still exit
+	// on link close; this just adds the shutdown-bounded backstop.
+	registry.drainCtx = ctx
 
 	// Direct mode: build a concrete provider for the configured cluster so the
 	// control plane can investigate the operator's own reachable stack with no
@@ -95,6 +101,15 @@ func New(ctx context.Context, cfg config.Server, logger *slog.Logger) (*ControlP
 			logger.Info("persistence: in-memory store active (no seed)")
 		}
 		st = mem
+	}
+
+	// Give the registry the store so live agent connect/disconnect (and the
+	// direct-mode cluster below) persist their connection state, not just seeded
+	// clusters. Set after the store exists but before the gateway can fire a
+	// connect callback.
+	registry.store = st
+	if cfg.DirectMode {
+		registry.persistCluster(cfg.Cluster, true)
 	}
 
 	gateway := agentlink.NewGateway(cfg.GatewayAddr, cfg.AgentToken, logger, registry.OnAgentConnect, registry.OnAgentDisconnect)

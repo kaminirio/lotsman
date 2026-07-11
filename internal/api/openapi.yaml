@@ -1,0 +1,1434 @@
+openapi: 3.1.0
+info:
+  title: Lotsman Control-Plane API
+  description: |
+    REST + SSE surface consumed by the Lotsman UI and API clients. The UI talks to
+    the control plane over this REST API and the `GET /api/v1/stream` SSE endpoint;
+    agents talk to the control plane over a separate gRPC channel (not described
+    here). All bodies are JSON unless noted.
+
+    Authentication is GitHub OAuth + a JWT session cookie (`lotsman_session`,
+    HttpOnly). When SSO is unconfigured (local dev) every request is the built-in
+    global-admin "anonymous" principal and auth is a transparent pass-through, so
+    the auth requirements below apply only when SSO is enabled.
+
+    RBAC is deny-by-default and enforced per resource on cluster/namespace scope.
+    Out-of-scope resources are hidden: list endpoints omit them, and single-object
+    reads that would leak existence (incidents) return 404 rather than 403.
+
+    Errors share one shape: `{"error": "<message>"}`. State-changing requests
+    (non GET/HEAD/OPTIONS) require the `X-Requested-With` header as CSRF defense
+    when SSO is enabled; omitting it yields 403.
+  version: "1.0.0"
+servers:
+  - url: /
+    description: Same-origin (the API is served alongside the embedded UI).
+tags:
+  - name: meta
+    description: Health, version, and the API specification itself.
+  - name: auth
+    description: Session and GitHub OAuth handshake.
+  - name: incidents
+    description: Incidents and on-demand investigation.
+  - name: clusters
+    description: Cluster fleet and live cluster inspection (nodes, pods, workloads, events, configmaps, secrets).
+  - name: admin
+    description: Admin-gated RBAC inspector.
+  - name: stream
+    description: Live incident updates over Server-Sent Events.
+
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness probe.
+      description: Always public (reachable without a session).
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                required: [status]
+
+  /api/v1/version:
+    get:
+      tags: [meta]
+      summary: Build version.
+      description: Public (reachable without a session).
+      security: []
+      responses:
+        "200":
+          description: The running build version.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                    example: v1.2.3
+                required: [version]
+
+  /api/v1/openapi.yaml:
+    get:
+      tags: [meta]
+      summary: This OpenAPI document (YAML).
+      description: |
+        Returns this specification as YAML. Registered under `/api/v1`, so when SSO
+        is enabled it requires a valid session like every other `/api/v1/*` route;
+        with SSO disabled it is open.
+      responses:
+        "200":
+          description: The OpenAPI document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Current authenticated principal.
+      description: |
+        Returns the current user plus the RBAC summary the UI needs (`is_admin`,
+        `groups`). Returns 401 with an empty body when unauthenticated.
+      responses:
+        "200":
+          description: The current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "401":
+          description: Not authenticated (empty body).
+
+  /auth/providers:
+    get:
+      tags: [auth]
+      summary: Enabled auth providers.
+      description: Public. Reports whether SSO/GitHub is configured so the UI can render the login button.
+      security: []
+      responses:
+        "200":
+          description: Provider availability.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  github:
+                    type: boolean
+                required: [enabled, github]
+
+  /auth/login/{provider}:
+    get:
+      tags: [auth]
+      summary: Begin the GitHub OAuth handshake.
+      description: |
+        Sets a state cookie and 302-redirects to GitHub's authorize URL. Public,
+        but per-IP rate-limited (burst 10, refill 1/s) because it triggers outbound
+        GitHub calls. Responds 404 when SSO is not configured.
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          description: Only `github` is supported.
+          schema:
+            type: string
+            enum: [github]
+      responses:
+        "302":
+          description: Redirect to the GitHub authorize URL.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: SSO is not configured.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/callback/{provider}:
+    get:
+      tags: [auth]
+      summary: GitHub OAuth callback.
+      description: |
+        Verifies the OAuth state (CSRF), exchanges the code, applies the login/group
+        allowlist, mints the session cookie, and 302-redirects to the UI. Public,
+        per-IP rate-limited (burst 10, refill 1/s). Responds 404 when SSO is not
+        configured. Authentication failures redirect to the UI login page with an
+        error query param rather than returning a 4xx.
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [github]
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Redirect to the UI (authenticated) or to the login page with an error.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: SSO is not configured.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke the current session.
+      description: |
+        Revokes the session JTI (so the stateless JWT is rejected before expiry) and
+        clears the cookie. Requires `X-Requested-With` when SSO is enabled (CSRF).
+      responses:
+        "200":
+          description: Logged out.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        "403":
+          description: Missing `X-Requested-With` header (SSO enabled).
+
+  /api/v1/incidents:
+    get:
+      tags: [incidents]
+      summary: List incidents (newest first), RBAC-filtered and paginated.
+      description: |
+        Returns incidents the caller may view, filtered by cluster/namespace scope.
+        The store is scanned newest-first (bounded), RBAC visibility is applied, and
+        only then is the page window taken — so a scoped viewer is never truncated
+        below a page of visible incidents.
+      parameters:
+        - name: cluster
+          in: query
+          description: Restrict to one cluster (store-side filter).
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Restrict to one incident status.
+          schema:
+            $ref: "#/components/schemas/IncidentStatus"
+        - name: limit
+          in: query
+          description: Page size. Default 50, capped at 200. Non-positive/garbage falls back to the default.
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+            minimum: 1
+        - name: offset
+          in: query
+          description: Number of visible incidents to skip. Negative/garbage becomes 0.
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        "200":
+          description: The page of visible incidents.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Incident"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/incidents/{id}:
+    get:
+      tags: [incidents]
+      summary: Get one incident.
+      description: |
+        Returns the full incident (timeline + ranked hypotheses). For non-admins the
+        timeline messages are redacted and raw payloads dropped. An out-of-scope or
+        missing incident both return 404 (no cross-tenant existence oracle).
+      parameters:
+        - $ref: "#/components/parameters/IncidentId"
+      responses:
+        "200":
+          description: The incident.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Incident"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/incidents/{id}/explain:
+    post:
+      tags: [incidents]
+      summary: Optional LLM root-cause narrative for an incident.
+      description: |
+        Produces an assistive, grounded root-cause explanation from the incident's
+        stored findings. Off by default: responds 503 when no LLM is configured, 502
+        on backend error. Same RBAC scope as reading the incident (404 out-of-scope).
+      parameters:
+        - $ref: "#/components/parameters/IncidentId"
+      responses:
+        "200":
+          description: The explanation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Explanation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          description: No LLM analyzer configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/investigate:
+    post:
+      tags: [incidents]
+      summary: Run an on-demand investigation and persist the incident.
+      description: |
+        Gathers logs/metrics/deployments/events live across the source seam for the
+        target resource, ranks probable causes, persists the incident, and publishes
+        it to the SSE stream. Requires investigate permission on the target
+        cluster/namespace. Per-IP rate-limited (burst 5, refill 1 per 2s). Request
+        body capped at 4 KiB.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InvestigateRequest"
+      responses:
+        "200":
+          description: The newly created incident.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Incident"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          description: Request body exceeded the 4 KiB cap.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/v1/clusters:
+    get:
+      tags: [clusters]
+      summary: List clusters (persisted union live registry).
+      description: |
+        Union of persisted clusters and clusters currently reachable through the
+        registry (direct providers + connected agents), filtered to those the caller
+        may see. A live cluster is forced `connected` with mode `connected`. Sorted
+        by name.
+      responses:
+        "200":
+          description: Visible clusters.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Cluster"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/clusters/{cluster}/nodes:
+    get:
+      tags: [clusters]
+      summary: List a cluster's nodes.
+      description: Cluster-scoped (nodes have no namespace); RBAC gates on cluster-level visibility.
+      parameters:
+        - $ref: "#/components/parameters/Cluster"
+      responses:
+        "200":
+          description: The cluster's nodes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Node"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/v1/clusters/{cluster}/namespaces/{namespace}/pods:
+    get:
+      tags: [clusters]
+      summary: List pods in a namespace.
+      description: |
+        Reads live pod state. Admins get verbatim/resolved env; non-admins get every
+        literal env value masked (default-deny) and valueFrom secrets left
+        unresolved. The `_all` namespace sentinel lists across all namespaces.
+      parameters:
+        - $ref: "#/components/parameters/Cluster"
+        - $ref: "#/components/parameters/Namespace"
+        - name: workload
+          in: query
+          description: Narrow the listing to pods owned by this workload name.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The namespace's pods.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Pod"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/v1/clusters/{cluster}/namespaces/{namespace}/pods/{pod}/logs:
+    get:
+      tags: [clusters]
+      summary: Tail a pod container's logs.
+      description: |
+        Returns a tail of one container's stdout/stderr. Non-admins get a redaction
+        pass over the log body. The `tail` line count defaults to 1000 and is capped
+        at 5000 (an oversized `tail` is clamped, a non-numeric one ignored).
+      parameters:
+        - $ref: "#/components/parameters/Cluster"
+        - name: namespace
+          in: path
+          required: true
+          description: Namespace (the `_all` sentinel is not used on this route).
+          schema:
+            type: string
+        - name: pod
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: container
+          in: query
+          description: Container name (defaults to the pod's first/only container).
+          schema:
+            type: string
+        - name: tail
+          in: query
+          description: Number of trailing log lines. Default 1000, capped at 5000.
+          schema:
+            type: integer
+            default: 1000
+            maximum: 5000
+            minimum: 1
+      responses:
+        "200":
+          description: The log tail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PodLogsResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/v1/clusters/{cluster}/namespaces/{namespace}/workloads:
+    get:
+      tags: [clusters]
+      summary: List workloads in a namespace.
+      description: Deployments/StatefulSets/DaemonSets/etc. as resource refs. `_all` lists across all namespaces.
+      parameters:
+        - $ref: "#/components/parameters/Cluster"
+        - $ref: "#/components/parameters/Namespace"
+      responses:
+        "200":
+          description: The namespace's workloads.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ResourceRef"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/v1/clusters/{cluster}/namespaces/{namespace}/workloads/{kind}/{name}/history:
+    get:
+      tags: [clusters]
+      summary: A workload's rollout history.
+      description: |
+        Image/revision history (newest first) reconstructed from ReplicaSet
+        revisions. Returns an empty array (not an error) when the source lacks
+        history support.
+      parameters:
+        - $ref: "#/components/parameters/Cluster"
+        - $ref: "#/components/parameters/Namespace"
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The workload's revisions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkloadRevision"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/v1/clusters/{cluster}/namespaces/{namespace}/events:
+    get:
+      tags: [clusters]
+      summary: List Kubernetes event signals for a namespace.
+      description: |
+        Returns Kubernetes events as normalized signals, newest first. `_all` lists
+        across all namespaces.
+      parameters:
+        - $ref: "#/components/parameters/Cluster"
+        - $ref: "#/components/parameters/Namespace"
+        - name: since
+          in: query
+          description: Lookback as a Go duration (e.g. `30m`, `2h`). Default 60m, capped at 24h.
+          schema:
+            type: string
+            default: 60m
+        - name: limit
+          in: query
+          description: Max events returned. Default 200, capped at 1000.
+          schema:
+            type: integer
+            default: 200
+            maximum: 1000
+            minimum: 1
+      responses:
+        "200":
+          description: The namespace's event signals.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Signal"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/v1/clusters/{cluster}/namespaces/{namespace}/configmaps:
+    get:
+      tags: [clusters]
+      summary: List ConfigMaps in a namespace.
+      description: Keys only (no values). `_all` lists across all namespaces.
+      parameters:
+        - $ref: "#/components/parameters/Cluster"
+        - $ref: "#/components/parameters/Namespace"
+      responses:
+        "200":
+          description: The namespace's ConfigMaps.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ConfigMapRef"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/v1/clusters/{cluster}/namespaces/{namespace}/configmaps/{name}:
+    get:
+      tags: [clusters]
+      summary: Get one ConfigMap's data.
+      description: For non-admins, values are run through the redactor; admins see verbatim.
+      parameters:
+        - $ref: "#/components/parameters/Cluster"
+        - name: namespace
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The ConfigMap.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigMapDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/v1/clusters/{cluster}/namespaces/{namespace}/secrets:
+    get:
+      tags: [clusters]
+      summary: List Secrets in a namespace.
+      description: |
+        Identity, type, keys, and — for TLS secrets — parsed public certificate
+        metadata. A listing never includes secret values. `_all` lists across all
+        namespaces.
+      parameters:
+        - $ref: "#/components/parameters/Cluster"
+        - $ref: "#/components/parameters/Namespace"
+      responses:
+        "200":
+          description: The namespace's Secrets.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SecretRef"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/v1/clusters/{cluster}/namespaces/{namespace}/secrets/{name}:
+    get:
+      tags: [clusters]
+      summary: Get one Secret's entries.
+      description: |
+        Admins (and the SSO-disabled global-admin default) get values revealed;
+        non-admins get every entry value masked (default-deny). Public certificate
+        metadata is returned regardless.
+      parameters:
+        - $ref: "#/components/parameters/Cluster"
+        - name: namespace
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The Secret.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecretDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /api/v1/admin/rbac/config:
+    get:
+      tags: [admin]
+      summary: Read the RBAC policy (admin only).
+      description: |
+        Returns the known role slugs and the configured user/group bindings. Never
+        surfaces any secret. Admin-gated: 401 unauthenticated, 403 non-admin.
+      responses:
+        "200":
+          description: The RBAC policy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RBACConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/rbac/effective:
+    get:
+      tags: [admin]
+      summary: Effective bindings for a login (admin only).
+      description: |
+        Computes the effective config-derived bindings and admin status for an
+        arbitrary GitHub login. Group-derived bindings can't be resolved without the
+        user's session, so only direct config bindings plus the implicit init_admin
+        grant are reported. Admin-gated.
+      parameters:
+        - name: user
+          in: query
+          description: GitHub login to resolve.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The effective bindings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RBACEffective"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/stream:
+    get:
+      tags: [stream]
+      summary: Live incident updates (Server-Sent Events).
+      description: |
+        A long-lived `text/event-stream`. Emits `data: <incident-json>\n\n` per new
+        incident, scoped to the subscriber's RBAC visibility, with periodic `: ping`
+        heartbeat comment lines. The stream stays open until the client disconnects.
+      responses:
+        "200":
+          description: The event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE frames; each `data:` line is a JSON-encoded Incident.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: lotsman_session
+      description: |
+        JWT session cookie (HttpOnly) minted by the OAuth callback. Required for all
+        endpoints except the explicitly public ones (health, version, providers, and
+        the OAuth handshake) when SSO is enabled.
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: X-Requested-With
+      description: Required on state-changing requests (non GET/HEAD/OPTIONS) when SSO is enabled.
+
+  parameters:
+    Cluster:
+      name: cluster
+      in: path
+      required: true
+      description: Cluster name.
+      schema:
+        type: string
+    Namespace:
+      name: namespace
+      in: path
+      required: true
+      description: Namespace name, or the `_all` sentinel to select every namespace.
+      schema:
+        type: string
+    IncidentId:
+      name: id
+      in: path
+      required: true
+      description: Incident ID.
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Not authenticated. `/api/v1/*` JSON handlers return an empty body; the auth middleware returns a plain-text message.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Authenticated but denied by RBAC (or missing the CSRF header).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Not found (also returned for out-of-scope resources to avoid an existence oracle).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Per-IP rate limit exceeded. Carries a `Retry-After` header.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BadGateway:
+      description: An upstream source/backend or the engine failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      description: The shared error envelope for every non-2xx JSON response.
+      properties:
+        error:
+          type: string
+      required: [error]
+
+    Me:
+      type: object
+      description: The current user plus the UI's RBAC summary.
+      allOf:
+        - $ref: "#/components/schemas/User"
+        - type: object
+          properties:
+            is_admin:
+              type: boolean
+            groups:
+              type: array
+              items:
+                type: string
+          required: [is_admin, groups]
+
+    User:
+      type: object
+      properties:
+        login:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+        provider:
+          type: string
+          description: '"github", or "none" for the local-dev anonymous principal.'
+        groups:
+          type: array
+          items:
+            type: string
+          description: GitHub org/team memberships used for group-based RBAC.
+      required: [login, name, email, provider]
+
+    IncidentStatus:
+      type: string
+      enum: [open, investigating, resolved, closed]
+
+    Severity:
+      type: integer
+      description: Ordered severity — 0 info, 1 warning, 2 error, 3 critical.
+      enum: [0, 1, 2, 3]
+
+    ResourceRef:
+      type: object
+      description: The canonical hierarchical identity (Cluster -> Namespace -> Kind/Name -> Pod).
+      properties:
+        cluster:
+          type: string
+        namespace:
+          type: string
+        kind:
+          type: string
+        name:
+          type: string
+        pod:
+          type: string
+      required: [cluster]
+
+    ChangeRef:
+      type: object
+      description: A deployment/rollout/config change (ArgoCD is the first backend).
+      properties:
+        source:
+          type: string
+        app:
+          type: string
+        revision:
+          type: string
+        synced_at:
+          type: string
+          format: date-time
+        url:
+          type: string
+      required: [source, app, revision, synced_at]
+
+    Signal:
+      type: object
+      description: One normalized observation about a resource at a point in time.
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [log, metric, change, k8s_event]
+        resource:
+          $ref: "#/components/schemas/ResourceRef"
+        timestamp:
+          type: string
+          format: date-time
+        severity:
+          $ref: "#/components/schemas/Severity"
+        source:
+          type: string
+          description: Adapter name (loki, victoriametrics, argocd, kubernetes).
+        title:
+          type: string
+        message:
+          type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        payload:
+          type: object
+          additionalProperties: true
+          description: Raw, kind-specific backend detail. Dropped for non-admins on incident reads.
+        change:
+          $ref: "#/components/schemas/ChangeRef"
+      required: [id, kind, resource, timestamp, severity, source, title]
+
+    Hypothesis:
+      type: object
+      description: A scored probable cause with supporting evidence.
+      properties:
+        summary:
+          type: string
+        confidence:
+          type: number
+          format: double
+          description: 0..1.
+        category:
+          type: string
+          description: deploy | resource | dependency | config | ...
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/Signal"
+        change:
+          $ref: "#/components/schemas/ChangeRef"
+      required: [summary, confidence, category, evidence]
+
+    Incident:
+      type: object
+      description: A resource in trouble, its correlated timeline, and ranked probable causes.
+      properties:
+        id:
+          type: string
+        resource:
+          $ref: "#/components/schemas/ResourceRef"
+        title:
+          type: string
+        status:
+          $ref: "#/components/schemas/IncidentStatus"
+        severity:
+          $ref: "#/components/schemas/Severity"
+        opened_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+        timeline:
+          type: array
+          items:
+            $ref: "#/components/schemas/Signal"
+        hypotheses:
+          type: array
+          items:
+            $ref: "#/components/schemas/Hypothesis"
+      required: [id, resource, title, status, severity, opened_at, updated_at, timeline, hypotheses]
+
+    InvestigateRequest:
+      type: object
+      properties:
+        cluster:
+          type: string
+        namespace:
+          type: string
+        kind:
+          type: string
+        name:
+          type: string
+      required: [cluster, namespace, kind, name]
+
+    Explanation:
+      type: object
+      description: Assistive, advisory LLM output (a suggestion over the deterministic findings).
+      properties:
+        summary:
+          type: string
+          description: 2-4 sentence NL root-cause narrative.
+        category:
+          type: string
+          enum: [deploy, resource, config, dependency, network, unknown]
+        confidence:
+          type: string
+          enum: [low, medium, high]
+        model:
+          type: string
+      required: [summary, category, confidence, model]
+
+    Cluster:
+      type: object
+      description: A registered cluster plus its agent connection state.
+      properties:
+        name:
+          type: string
+        env:
+          type: string
+        region:
+          type: string
+        connected:
+          type: boolean
+        agent_version:
+          type: string
+        mode:
+          type: string
+          description: '"connected" when reachable through the registry; empty for store-only clusters.'
+      required: [name, env, region, connected]
+
+    Node:
+      type: object
+      description: Backend-agnostic view of a Kubernetes node (cluster-scoped, no namespace).
+      properties:
+        name:
+          type: string
+        ready:
+          type: boolean
+        roles:
+          type: array
+          items:
+            type: string
+        kubelet_version:
+          type: string
+        os:
+          type: string
+        arch:
+          type: string
+        os_image:
+          type: string
+        kernel_version:
+          type: string
+        container_runtime:
+          type: string
+        internal_ip:
+          type: string
+        cpu_capacity:
+          type: string
+          description: Raw Kubernetes quantity, e.g. "8".
+        memory_capacity:
+          type: string
+          description: Raw Kubernetes quantity, e.g. "16412236Ki".
+        pods_capacity:
+          type: string
+        cpu_allocatable:
+          type: string
+        memory_allocatable:
+          type: string
+        unschedulable:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+      required: [name, ready, created_at]
+
+    EnvVarSource:
+      type: object
+      properties:
+        kind:
+          type: string
+          description: For valueFrom, one of secret|configMap|field|resource; otherwise the owning workload kind or "Pod".
+        name:
+          type: string
+        key:
+          type: string
+      required: [kind]
+
+    ContainerEnvVar:
+      type: object
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+          description: Literal or resolved value; masked or omitted for non-admins / valueFrom.
+        masked:
+          type: boolean
+        source:
+          $ref: "#/components/schemas/EnvVarSource"
+      required: [name]
+
+    Container:
+      type: object
+      properties:
+        name:
+          type: string
+        image:
+          type: string
+        ready:
+          type: boolean
+        state:
+          type: string
+          description: running | waiting | terminated (empty until reported).
+        reason:
+          type: string
+          description: Kubelet reason for a waiting/terminated container (e.g. CrashLoopBackOff).
+        restart_count:
+          type: integer
+        env:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContainerEnvVar"
+      required: [name, image, ready]
+
+    WorkloadRef:
+      type: object
+      properties:
+        kind:
+          type: string
+        name:
+          type: string
+      required: [kind, name]
+
+    Pod:
+      type: object
+      properties:
+        name:
+          type: string
+        namespace:
+          type: string
+        phase:
+          type: string
+        ready:
+          type: boolean
+        restarts:
+          type: integer
+        node:
+          type: string
+        owner:
+          $ref: "#/components/schemas/WorkloadRef"
+        containers:
+          type: array
+          items:
+            $ref: "#/components/schemas/Container"
+      required: [name, namespace, phase, ready, restarts, containers]
+
+    PodLogsResult:
+      type: object
+      properties:
+        pod:
+          type: string
+        namespace:
+          type: string
+        container:
+          type: string
+        lines:
+          type: string
+          description: Raw newline-delimited log body (redacted for non-admins).
+        truncated:
+          type: boolean
+      required: [pod, namespace, container, lines]
+
+    WorkloadRevision:
+      type: object
+      properties:
+        revision:
+          type: integer
+          format: int64
+        images:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        change_cause:
+          type: string
+        current:
+          type: boolean
+      required: [revision, images, created_at]
+
+    ConfigMapRef:
+      type: object
+      properties:
+        cluster:
+          type: string
+        namespace:
+          type: string
+        name:
+          type: string
+        keys:
+          type: array
+          items:
+            type: string
+      required: [cluster, namespace, name, keys]
+
+    ConfigMapDetail:
+      type: object
+      properties:
+        cluster:
+          type: string
+        namespace:
+          type: string
+        name:
+          type: string
+        data:
+          type: object
+          additionalProperties:
+            type: string
+          description: Binary entries surface as the sentinel "<binary>". Values redacted for non-admins.
+      required: [cluster, namespace, name, data]
+
+    CertInfo:
+      type: object
+      description: Parsed, public X.509 metadata (never private key material).
+      properties:
+        subject_cn:
+          type: string
+        issuer_cn:
+          type: string
+        not_before:
+          type: string
+          format: date-time
+        not_after:
+          type: string
+          format: date-time
+        dns_names:
+          type: array
+          items:
+            type: string
+        serial:
+          type: string
+        is_ca:
+          type: boolean
+        key_algorithm:
+          type: string
+        expired:
+          type: boolean
+        expires_in_days:
+          type: integer
+      required: [subject_cn, issuer_cn, not_before, not_after, expired, expires_in_days]
+
+    SecretEntry:
+      type: object
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+          description: Populated only when authorized to reveal (or a public cert entry); else masked.
+        masked:
+          type: boolean
+        is_cert:
+          type: boolean
+      required: [key]
+
+    SecretRef:
+      type: object
+      properties:
+        cluster:
+          type: string
+        namespace:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        keys:
+          type: array
+          items:
+            type: string
+        is_tls:
+          type: boolean
+        cert:
+          $ref: "#/components/schemas/CertInfo"
+      required: [cluster, namespace, name, type, keys]
+
+    SecretDetail:
+      type: object
+      properties:
+        cluster:
+          type: string
+        namespace:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/SecretEntry"
+        cert:
+          $ref: "#/components/schemas/CertInfo"
+      required: [cluster, namespace, name, type, entries]
+
+    RoleBinding:
+      type: object
+      description: Grants a role over a cluster/namespace scope to a GitHub login.
+      properties:
+        subject:
+          type: string
+        role:
+          type: string
+          enum: [admin, operator, viewer]
+        cluster:
+          type: string
+        namespace:
+          type: string
+      required: [subject, role, cluster]
+
+    GroupRoleBinding:
+      type: object
+      description: Grants a role over a scope to a GitHub group (org or org/team slug).
+      properties:
+        group:
+          type: string
+        role:
+          type: string
+          enum: [admin, operator, viewer]
+        cluster:
+          type: string
+        namespace:
+          type: string
+      required: [group, role, cluster]
+
+    RBACConfig:
+      type: object
+      properties:
+        roles:
+          type: array
+          items:
+            type: string
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoleBinding"
+        group_bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/GroupRoleBinding"
+      required: [roles, bindings, group_bindings]
+
+    EffectiveBinding:
+      type: object
+      description: A scope-only binding (subject/group implied by the query).
+      properties:
+        role:
+          type: string
+        cluster:
+          type: string
+        namespace:
+          type: string
+      required: [role, cluster]
+
+    RBACEffective:
+      type: object
+      properties:
+        user:
+          type: string
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/EffectiveBinding"
+        is_admin:
+          type: boolean
+      required: [user, bindings, is_admin]
+
+security:
+  - sessionCookie: []

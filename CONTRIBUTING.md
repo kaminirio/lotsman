@@ -6,11 +6,12 @@ kinds are welcome — bug reports, docs, tests, and code.
 
 ## Project status
 
-Lotsman is a **compiling scaffold**. The structure, interfaces, and the correlation
-engine are real and run; several concrete adapters (Loki / VictoriaMetrics / ArgoCD /
-Kubernetes), the gRPC agent transport, the Postgres store, and auth have `TODO(impl)`
-markers. Grep `TODO(impl)` for the open work, and read `docs/ARCHITECTURE.md` (§12)
-for the prioritized roadmap.
+Lotsman is pre-1.0 but the core is built and tested: the correlation engine, the
+concrete adapters (Loki / VictoriaMetrics / ArgoCD / Kubernetes), the gRPC agent
+transport, the Postgres store, the detector scheduler, and auth are all implemented.
+Genuinely remaining work — agentlink mTLS, the watch-event push path, metrics in the
+timeline, the CLI, a Helm chart, richer ranker heuristics — is tracked in
+`docs/ARCHITECTURE.md` (§12).
 
 ## Development setup
 
@@ -18,7 +19,7 @@ Requirements: **Go 1.26+**, **Node 22+** (for the UI), and Docker (for the local
 stack and image builds).
 
 ```sh
-go build ./...                 # must always pass — the Go scaffold is std-lib only
+go build ./...                 # must always pass
 go vet ./... && gofmt -l .     # gofmt -l must print nothing
 go test ./...
 
@@ -51,15 +52,14 @@ These are load-bearing design invariants (see `docs/adr/`):
 
 Before opening a PR, make sure:
 
-- [ ] `go build ./...` passes (offline — don't add dependencies for scaffolding alone).
+- [ ] `go build ./...` passes.
 - [ ] `go vet ./...` is clean and `gofmt -l .` prints nothing.
 - [ ] `go test ./...` passes; new behavior has tests.
 - [ ] No secrets, credentials, PII, or private infrastructure details are added.
 - [ ] Docs/ADRs are updated when you change how a subsystem works.
 
-Keep commits focused and write clear messages. New backend dependencies (client-go,
-pgx, grpc, oauth2, cobra) are added with `go get` only when implementing the
-corresponding stub — see the note in `docs/ARCHITECTURE.md`.
+Keep commits focused and write clear messages. Add new dependencies only when a
+change genuinely needs them, and keep them behind the source-agnostic seam above.
 
 ## Reporting bugs and requesting features
 

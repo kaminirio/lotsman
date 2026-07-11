@@ -20,16 +20,23 @@ import (
 // maxBody bounds how much of a metrics response we read.
 const maxBody = 32 * 1024 * 1024
 
+// defaultTimeout is applied to the fallback HTTP client so a hung metrics backend
+// cannot stall an investigation indefinitely. Production callers construct this
+// adapter with a nil client, so the timeout must live at the adapter level.
+const defaultTimeout = 30 * time.Second
+
 // Client queries VictoriaMetrics (vmselect) or Prometheus. Runs inside the agent.
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
 }
 
-// New constructs a metrics client. A nil http.Client uses http.DefaultClient.
+// New constructs a metrics client. A nil http.Client falls back to a client with
+// a sane default timeout (defaultTimeout) rather than http.DefaultClient, which
+// has none — production callers pass nil.
 func New(baseURL string, hc *http.Client) *Client {
 	if hc == nil {
-		hc = http.DefaultClient
+		hc = &http.Client{Timeout: defaultTimeout}
 	}
 	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), HTTP: hc}
 }
@@ -118,7 +125,7 @@ func (c *Client) fetch(ctx context.Context, path string, params url.Values) (*pr
 	if err != nil {
 		return nil, fmt.Errorf("victoriametrics: create request: %w", err)
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := sources.DoWithRetry(c.HTTP, req)
 	if err != nil {
 		return nil, fmt.Errorf("victoriametrics: request failed: %w", err)
 	}

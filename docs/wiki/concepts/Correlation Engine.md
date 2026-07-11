@@ -3,7 +3,7 @@ title: "Correlation Engine"
 type: concept
 tags: [concept, architecture, investigation, scheduler, sse]
 created: 2026-06-21 13:30:00
-updated: 2026-06-24 15:30:00
+updated: 2026-07-11 17:58:00
 status: current
 aliases: ["Investigation Engine", "Change-First Ranking"]
 ---
@@ -45,9 +45,13 @@ The public `Scan` and `Investigate` methods are preserved as API surface for the
 - `bus.go`: in-process pub/sub over a buffered channel. `Publish` snapshots the subscriber list under the lock and releases it before sending — a blocked subscriber goroutine cannot stall detection. A per-subscriber mutex + closed-flag gate prevents send-on-closed-channel panics on concurrent disconnect.
 - `sse.go` (`GET /api/v1/stream`): subscribes to the bus, writes `data: {json}\n\n` frames, sends `: heartbeat` comments every 15 s, and unsubscribes cleanly on client disconnect.
 
-## Caveat: Metrics Not Yet in Timeline
+## Metrics in the Timeline (2026-07-11 campaign)
 
-The PromQL/VictoriaMetrics metric detector (`internal/engine/detector/metric.go`) does not yet feed signals into the investigation timeline. Log, Kubernetes-event, and change-event signals are correlated; metric anomalies are the next planned correlation layer. See [[Feature Platform Foundation 2026-06-21]] §caveats.
+Metrics are now gathered into the correlated timeline: `Correlator.Timeline` queries `MetricSource` alongside logs, Kubernetes events, and change events (previously the metric source was never queried, so metric anomalies never reached the ranker). `ranker.go` gained a metric-anomaly hypothesis alongside the existing change-first and OOM/evicted heuristics, and (from Wave 3) a log-burst hypothesis. See [[Backlog Improvement Campaign Waves 0-3 2026-07-11]].
+
+## Per-Source Timeout
+
+`Correlator.Timeline` (`internal/engine/correlator.go`) now wraps each source call in its own `context.WithTimeout`, complementing the adapter-level HTTP timeouts in [[Source-Agnostic Adapters]] — one slow source can no longer stall the whole gather.
 
 ## Examples & Code
 
@@ -59,6 +63,7 @@ The PromQL/VictoriaMetrics metric detector (`internal/engine/detector/metric.go`
 - **Related topics:** [[Source-Agnostic Adapters]], [[Agent Control Plane Topology]], [[Persistence and State]]
 - **Implementation report:** [[Feature Platform Foundation 2026-06-21]]
 - **Improve pass report:** [[Improve Engine Hardening and CVE Remediation 2026-06-24]] (ScanAndInvestigate hot path, bus snapshot fix, ranker boundary tests)
+- **Backlog campaign report:** [[Backlog Improvement Campaign Waves 0-3 2026-07-11]] (metrics wired into the timeline; per-source timeout; log-burst ranker hypothesis; watch-event push feeds the bus outside the scan tick — see [[Agent Control Plane Topology]])
 - **Related concept:** [[LLM Incident Explainer]] (optional assistive layer; the engine's ranker output feeds the explainer prompt)
 - **Relevant skills:** `golang-design-patterns`, `golang-concurrency`, `golang-testing` — see [[Development Skills]]
 - **Sources:** `internal/engine/`, `internal/controlplane/scheduler.go`, `internal/events/bus.go`, `docs/adr/0008-correlation-change-first.md`

@@ -1,0 +1,22 @@
+{{- if .Values.controlPlane.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lotsman.controlPlane.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lotsman.componentLabels" (dict "root" . "component" "control-plane") | nindent 4 }}
+  {{- with .Values.controlPlane.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.controlPlane.service.type }}
+  selector:
+    {{- include "lotsman.componentSelectorLabels" (dict "root" . "component" "control-plane") | nindent 4 }}
+  ports:
+    - name: api
+      port: {{ .Values.controlPlane.service.port }}
+      targetPort: api
+      protocol: TCP
+{{- end }}

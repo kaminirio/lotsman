@@ -17,6 +17,10 @@ type Ranker struct {
 	ChangeWindow time.Duration // how long after a change we still implicate it
 }
 
+// logBurstThreshold is the number of error-or-worse log signals in the incident
+// window that constitutes a "burst" worth surfacing as its own hypothesis.
+const logBurstThreshold = 5
+
 // NewRanker constructs a Ranker with sensible defaults.
 func NewRanker() *Ranker { return &Ranker{ChangeWindow: 15 * time.Minute} }
 
@@ -58,6 +62,45 @@ func (r *Ranker) Rank(inc *model.Incident) []model.Hypothesis {
 				Evidence:   []model.Signal{s},
 			})
 		}
+	}
+
+	// 3. Metric anomaly — a flagged metric spike within the window. This is a
+	// corroborating "what's on fire" signal, lower precision than a change, so it
+	// must rank below ANY in-window deploy-before-incident (change-first, ADR-0008)
+	// and below resource pressure. The deploy confidence decays 0.9→0.4 across the
+	// change window, so the metric confidence is capped strictly BELOW that 0.4
+	// floor (0.39): even a near-boundary deploy still outranks a metric anomaly.
+	for _, s := range inc.Timeline {
+		if s.Kind != model.SignalMetric || s.Severity < model.SeverityWarning {
+			continue // only flagged spikes, not baseline metric context
+		}
+		hyps = append(hyps, model.Hypothesis{
+			Summary:    fmt.Sprintf("Metric anomaly: %s", s.Title),
+			Confidence: 0.39,
+			Category:   "metric",
+			Evidence:   []model.Signal{s},
+		})
+	}
+
+	// 4. Log burst — a spike of error/critical log lines in the window. This is a
+	// corroborating "what's on fire" symptom, not a cause, so it must rank below
+	// any in-window deploy (change-first floor 0.4) and at/under the metric
+	// anomaly (0.39): confidence is fixed at 0.35. Only a genuine burst
+	// (>= logBurstThreshold lines) qualifies, so ordinary error-log noise does not
+	// manufacture a hypothesis.
+	var errLogs []model.Signal
+	for _, s := range inc.Timeline {
+		if s.Kind == model.SignalLog && s.Severity >= model.SeverityError {
+			errLogs = append(errLogs, s)
+		}
+	}
+	if len(errLogs) >= logBurstThreshold {
+		hyps = append(hyps, model.Hypothesis{
+			Summary:    fmt.Sprintf("Log burst: %d error+ log lines in the incident window", len(errLogs)),
+			Confidence: 0.35,
+			Category:   "logs",
+			Evidence:   errLogs,
+		})
 	}
 
 	sort.SliceStable(hyps, func(i, j int) bool { return hyps[i].Confidence > hyps[j].Confidence })

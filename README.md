@@ -12,8 +12,8 @@
   <a href="https://github.com/kaminirio/lotsman/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/kaminirio/lotsman/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-7c6cf6.svg"></a>
   <img alt="Go" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white">
-  <img alt="UI" src="https://img.shields.io/badge/UI-Next.js_15-000?logo=nextdotjs&logoColor=white">
-  <img alt="Status" src="https://img.shields.io/badge/status-early_scaffold-f59e0b">
+  <img alt="UI" src="https://img.shields.io/badge/UI-Next.js_16-000?logo=nextdotjs&logoColor=white">
+  <img alt="Status" src="https://img.shields.io/badge/status-pre--1.0-f59e0b">
   <a href="CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-22c55e.svg"></a>
 </p>
 
@@ -125,6 +125,23 @@ semver tag:
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
+## Production install
+
+The Quickstart above is for local dev. To deploy Lotsman to a real cluster, use the
+Helm chart under [`deploy/helm/lotsman`](deploy/helm/lotsman):
+
+```sh
+helm install lotsman ./deploy/helm/lotsman \
+  --namespace lotsman --create-namespace \
+  --set secret.agentToken="$(openssl rand -hex 32)"
+```
+
+The chart deploys the control plane (REST/UI + agent gateway) and an optional
+in-cluster agent, with production defaults (pinned tags, resource limits,
+non-root/read-only securityContext, probes, RBAC). See the full
+[**Production install guide**](docs/INSTALL.md) for direct vs. agent mode,
+multi-cluster agents, external Postgres, SSO/OAuth, and upgrades.
+
 ## Project layout
 
 | Path | What |
@@ -136,17 +153,18 @@ git tag v0.1.0 && git push origin v0.1.0
 | `internal/controlplane` | registry + wiring |
 | `internal/api` | REST API + embedded UI |
 | `internal/auth` · `internal/rbac` | sessions, GitHub OAuth, config-driven RBAC |
-| `internal/store` | persistence (in-memory now, Postgres planned) |
+| `internal/store` | persistence (in-memory or Postgres, selected by config) |
 | `ui/` | Next.js app (embedded into the control-plane binary) |
 
 ## Status
 
-Lotsman is an early, **compiling scaffold**: the structure, interfaces, and the
-correlation engine are real and run on seed data. Several concrete adapters
-(Loki / VictoriaMetrics / ArgoCD / Kubernetes), the gRPC agent transport, the Postgres
-store, and auth still carry `TODO(impl)` markers — grep for them, and see
-`docs/ARCHITECTURE.md` §12 for the prioritized roadmap. The Go scaffold is deliberately
-**standard-library-only** so `go build ./...` works offline.
+Lotsman is early and pre-1.0, but the core is built and tested (313 tests): the
+correlation engine, the concrete adapters (Loki / VictoriaMetrics / ArgoCD /
+Kubernetes), the gRPC agent transport, the Postgres store, the detector scheduler +
+SSE bus, and GitHub OAuth + JWT + RBAC auth are all implemented and wired. What's
+left is real product work — agentlink mTLS, the watch-event push path, metrics in
+the correlation timeline, the CLI, a Helm chart, and richer ranker heuristics. See
+`docs/ARCHITECTURE.md` §12 for the prioritized roadmap.
 
 ## Contributing
 

@@ -76,8 +76,11 @@ func (m *Memory) ListIncidents(_ context.Context, f IncidentFilter) ([]*model.In
 	}
 	// Most recent first.
 	sort.SliceStable(out, func(i, j int) bool { return out[i].OpenedAt.After(out[j].OpenedAt) })
-	if f.Limit > 0 && len(out) > f.Limit {
-		out = out[:f.Limit]
+	// Always bound the result set, mirroring the Postgres store: an unset Limit
+	// falls back to DefaultIncidentListLimit rather than returning everything
+	// (STORE-3).
+	if lim := f.effectiveLimit(); len(out) > lim {
+		out = out[:lim]
 	}
 	return out, nil
 }
@@ -85,6 +88,21 @@ func (m *Memory) ListIncidents(_ context.Context, f IncidentFilter) ([]*model.In
 func (m *Memory) SaveCluster(_ context.Context, c Cluster) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Preserve descriptive fields the caller left empty (e.g. a live agent connect
+	// carries only name+connected) so it can't wipe env/region/version recorded by
+	// seed or an earlier save — mirroring the Postgres COALESCE upsert. connected
+	// always reflects the latest call.
+	if prev, ok := m.clusters[c.Name]; ok {
+		if c.Env == "" {
+			c.Env = prev.Env
+		}
+		if c.Region == "" {
+			c.Region = prev.Region
+		}
+		if c.AgentVersion == "" {
+			c.AgentVersion = prev.AgentVersion
+		}
+	}
 	m.clusters[c.Name] = c
 	return nil
 }

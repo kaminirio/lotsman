@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 )
@@ -43,17 +44,35 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		}
 
 		if _, ok := m.CurrentUser(r); !ok {
-			http.Error(w, "not authenticated", http.StatusUnauthorized)
+			// JSON API surface (/api/v1): use the standard {"error":...} envelope so
+			// every API rejection shares one shape (API-5).
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 
 		if isMutation(r.Method) && r.Header.Get("X-Requested-With") == "" {
-			http.Error(w, "missing X-Requested-With header", http.StatusForbidden)
+			writeJSONError(w, http.StatusForbidden, "missing X-Requested-With header")
 			return
 		}
 
+		// Sliding expiry: re-issue the session cookie when it is near its TTL so an
+		// active user is not hard-logged-out at the fixed lifetime (API-7). No-op for
+		// a fresh cookie. Must run before next writes the body so the Set-Cookie
+		// header lands.
+		m.refreshSession(w, r)
+
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeJSONError emits the standard {"error":"..."} envelope used across the JSON
+// API surface, so the auth middleware's /api/v1 rejections share one shape with
+// the api-package handlers (API-5). Browser-flow endpoints (OAuth login/callback
+// redirects, /auth/logout CSRF) deliberately keep their text/plain responses.
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // isUnprotected reports whether a path is reachable without a session.

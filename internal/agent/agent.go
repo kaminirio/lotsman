@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"lotsman/internal/agentlink"
 	"lotsman/internal/config"
@@ -18,6 +19,11 @@ import (
 	"lotsman/internal/sources/loki"
 	"lotsman/internal/sources/victoriametrics"
 )
+
+// eventWatchInterval is how often the agent's Kubernetes watch-feed polls for
+// new events to push up the link (LINK-1). Short relative to the control plane's
+// 30s poll scheduler so push is the fast path and poll is the safety net.
+const eventWatchInterval = 10 * time.Second
 
 // Agent runs inside a cluster.
 type Agent struct {
@@ -56,8 +62,41 @@ func New(cfg config.Agent, logger *slog.Logger) (*Agent, error) {
 		logger:   logger,
 		provider: provider,
 		dialer: agentlink.NewDialer(cfg.ControlPlaneAddr, cfg.Token, logger).
-			WithIdentity(cfg.Cluster, cfg.Version, []string{"loki", "victoriametrics", "argocd", "kubernetes"}),
+			WithIdentity(cfg.Cluster, cfg.Version, []string{"loki", "victoriametrics", "argocd", "kubernetes"}).
+			WithEventFeed(kubeEventFeed(kube, cfg.Cluster)),
 	}, nil
+}
+
+// kubeEventFeed adapts the Kubernetes adapter's watch-feed into the link's
+// Event stream (LINK-1). The dialer's pushLoop calls this once per connection
+// with a per-connection ctx (cancelled when the stream drops), so the underlying
+// poll goroutine is torn down and re-established across reconnects — no leak.
+// Each new Kubernetes event Signal becomes an agentlink.Event tagged with this
+// cluster and is streamed up to the control plane for immediate detection.
+func kubeEventFeed(kube *kubernetes.Client, cluster string) func(context.Context) <-chan agentlink.Event {
+	return func(ctx context.Context) <-chan agentlink.Event {
+		signals := kube.WatchEvents(ctx, eventWatchInterval)
+		out := make(chan agentlink.Event)
+		go func() {
+			defer close(out)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case sig, ok := <-signals:
+					if !ok {
+						return
+					}
+					select {
+					case out <- agentlink.Event{Cluster: cluster, Signal: sig}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}()
+		return out
+	}
 }
 
 // Run dials the control plane and serves until ctx is cancelled.

@@ -1,0 +1,10 @@
+# Patterns to ignore when building packages.
+*.tmpl
+.DS_Store
+.git/
+.gitignore
+*.tgz
+*.orig
+*.swp
+.vscode/
+.idea/

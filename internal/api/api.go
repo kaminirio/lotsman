@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"lotsman/internal/analyze"
@@ -52,11 +53,14 @@ type Server struct {
 	cfg    Config
 	logger *slog.Logger
 	http   *http.Server
+	// corsOrigins is the opt-in CORS allowlist (API-8), read once at construction
+	// from LOTSMAN_CORS_ALLOWED_ORIGINS. Empty => CORS disabled (same-origin only).
+	corsOrigins map[string]struct{}
 }
 
 // New constructs the API server.
 func New(cfg Config, logger *slog.Logger) (*Server, error) {
-	s := &Server{cfg: cfg, logger: logger}
+	s := &Server{cfg: cfg, logger: logger, corsOrigins: parseCORSOrigins(os.Getenv(corsOriginsEnv))}
 	s.http = &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           s.routes(),

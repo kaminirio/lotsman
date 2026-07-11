@@ -1,0 +1,91 @@
+{{- if .Values.agent.enabled }}
+{{- if and (not .Values.agent.controlPlaneAddr) (not .Values.controlPlane.enabled) }}
+{{- fail "agent.controlPlaneAddr is required when the control plane is not deployed in this release (agent-only install). Point it at the hub cluster's gateway Service, e.g. \"1.2.3.4:9090\"." }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lotsman.agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lotsman.componentLabels" (dict "root" . "component" "agent") | nindent 4 }}
+spec:
+  replicas: {{ .Values.agent.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "lotsman.componentSelectorLabels" (dict "root" . "component" "agent") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lotsman.componentSelectorLabels" (dict "root" . "component" "agent") | nindent 8 }}
+        {{- with .Values.agent.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.agent.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "lotsman.agent.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.agent.podSecurityContext | nindent 8 }}
+      containers:
+        - name: agent
+          image: {{ include "lotsman.image" (dict "root" . "repository" .Values.agent.image.repository "tag" .Values.agent.image.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.agent.securityContext | nindent 12 }}
+          env:
+            - name: LOTSMAN_CONTROL_PLANE_ADDR
+              value: {{ include "lotsman.agent.controlPlaneAddr" . | quote }}
+            - name: LOTSMAN_CLUSTER
+              value: {{ .Values.agent.cluster | quote }}
+            - name: LOTSMAN_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "lotsman.secretName" . }}
+                  key: {{ .Values.secret.keys.agentToken }}
+            {{- with .Values.agent.backends.lokiUrl }}
+            - name: LOTSMAN_LOKI_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.agent.backends.victoriaUrl }}
+            - name: LOTSMAN_VICTORIA_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.agent.backends.argocdUrl }}
+            - name: LOTSMAN_ARGOCD_URL
+              value: {{ . | quote }}
+            {{- end }}
+            - name: LOTSMAN_ARGOCD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "lotsman.secretName" . }}
+                  key: {{ .Values.secret.keys.argocdToken }}
+                  optional: true
+            {{- if .Values.agent.allowEnvReveal }}
+            - name: LOTSMAN_ALLOW_ENV_REVEAL
+              value: "1"
+            {{- end }}
+            {{- with .Values.agent.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+      {{- with .Values.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

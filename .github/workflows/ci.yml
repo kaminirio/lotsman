@@ -23,6 +23,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          # Use the newest 1.26.x patch so stdlib security fixes land and
+          # govulncheck stays green (go.mod's `go` line is only a floor).
+          check-latest: true
           cache: true
 
       - name: gofmt
@@ -37,11 +40,24 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+
       - name: go build
         run: go build ./...
 
-      - name: go test
-        run: go test ./...
+      - name: go test (race + coverage)
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
 
   ui:
     name: UI build
@@ -54,12 +70,56 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "26"
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
+      - name: npm audit (fail on high/critical)
+        run: npm audit --audit-level=high
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test:run
+
       - name: Build
         run: npm run build
+
+  embed:
+    name: UI export -> Go embed contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # Verifies the ui/out -> internal/ui/dist export+embed path used by the
+      # Makefile and Dockerfile (the plain `ui` job discards its output). `make
+      # ui-build` runs the static export and copies it into the Go embed dir.
+      - name: Build UI export and copy into the embed dir
+        run: make ui-build
+
+      - name: Verify the embed dir is populated
+        run: |
+          if [ ! -f internal/ui/dist/index.html ]; then
+            echo "internal/ui/dist/index.html missing — the ui/out -> internal/ui/dist embed contract is broken"
+            ls -la internal/ui/dist || true
+            exit 1
+          fi
+
+      - name: Build the server with the embedded UI
+        run: go build ./cmd/server

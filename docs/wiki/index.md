@@ -1,7 +1,7 @@
 ---
 title: "Map of Content (MOC)"
 type: index
-updated: 2026-06-28 14:43:48
+updated: 2026-07-11 18:01:30
 ---
 
 # 🗺 Map of Content (LLM Wiki MOC)
@@ -28,6 +28,7 @@ Project knowledge base index — generated automatically, do not edit by hand.
 ---
 
 ## 📋 Reports & Findings
+* [[Backlog Improvement Campaign Waves 0-3 2026-07-11]]
 * [[Feature Kubernetes Resource Inspection 2026-06-22]]
 * [[Feature LLM Incident Explainer 2026-06-22]]
 * [[Feature Lens UI Redesign 2026-06-22]]

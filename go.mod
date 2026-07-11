@@ -2,21 +2,24 @@ module lotsman
 
 go 1.26.0
 
-// NOTE: The scaffold is intentionally standard-library-only so `go build ./...`
-// works offline. The concrete adapters and infrastructure pull these in as they
-// are implemented:
+// The control plane and agent are implemented and wired; these direct
+// dependencies back the concrete adapters and infrastructure:
 //
-//	k8s.io/client-go            // Kubernetes informers/clients (ClusterSource)
-//	github.com/jackc/pgx/v5     // PostgreSQL control-plane state (store)
-//	google.golang.org/grpc      // agent <-> control-plane link (agentlink)
+//	k8s.io/client-go            // Kubernetes ClusterSource (internal/sources/kubernetes)
+//	github.com/jackc/pgx/v5     // PostgreSQL control-plane state (internal/store)
+//	google.golang.org/grpc      // agent <-> control-plane link (internal/agentlink)
 //	google.golang.org/protobuf  // proto/lotsman.proto generated types
-//	github.com/golang-jwt/jwt/v5
-//	golang.org/x/oauth2         // GitHub OAuth (auth)
-//	github.com/spf13/cobra      // CLI (cmd/lotsman)
+//	github.com/golang-jwt/jwt/v5 // session JWTs (internal/auth)
+//	golang.org/x/oauth2         // GitHub OAuth (internal/auth)
+//
+// The protobuf pin below is a pseudo-version because k8s.io v0.36.2
+// (apimachinery/client-go) requires that exact commit; do not "upgrade" it to
+// an older tagged release — doing so downgrades client-go to a pre-release.
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/spf13/cobra v1.10.2
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
@@ -35,6 +38,7 @@ require (
 	github.com/go-openapi/swag v0.23.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect

@@ -23,6 +23,11 @@ import (
 // maxBody bounds how much of an ArgoCD response we read.
 const maxBody = 8 * 1024 * 1024
 
+// defaultTimeout is applied to the fallback HTTP client so a hung ArgoCD backend
+// cannot stall an investigation indefinitely. Production callers construct this
+// adapter with a nil client, so the timeout must live at the adapter level.
+const defaultTimeout = 30 * time.Second
+
 // Client reads ArgoCD application history. Runs inside the agent.
 type Client struct {
 	BaseURL string
@@ -30,10 +35,12 @@ type Client struct {
 	HTTP    *http.Client
 }
 
-// New constructs an ArgoCD client. A nil http.Client uses http.DefaultClient.
+// New constructs an ArgoCD client. A nil http.Client falls back to a client with
+// a sane default timeout (defaultTimeout) rather than http.DefaultClient, which
+// has none — production callers pass nil.
 func New(baseURL, token string, hc *http.Client) *Client {
 	if hc == nil {
-		hc = http.DefaultClient
+		hc = &http.Client{Timeout: defaultTimeout}
 	}
 	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), Token: token, HTTP: hc}
 }
@@ -148,7 +155,7 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, v any) error {
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := sources.DoWithRetry(c.HTTP, req)
 	if err != nil {
 		return fmt.Errorf("argocd: request failed: %w", err)
 	}

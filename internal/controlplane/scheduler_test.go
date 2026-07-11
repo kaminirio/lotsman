@@ -42,6 +42,17 @@ func (f *fakeScanner) ScanAndInvestigate(_ context.Context, _ string, _ detector
 	return out, nil
 }
 
+// Investigate builds one incident for the given resource, so the push path can be
+// exercised without a real engine.
+func (f *fakeScanner) Investigate(_ context.Context, ref model.ResourceRef, around time.Time, _ time.Duration) (*model.Incident, error) {
+	return &model.Incident{
+		ID:        "inc-" + ref.Name,
+		Resource:  ref,
+		OpenedAt:  around,
+		UpdatedAt: f.updatedAt,
+	}, nil
+}
+
 func TestSchedulerTickPublishesAndDedupes(t *testing.T) {
 	ref := model.ResourceRef{Cluster: "c1", Namespace: "demo", Kind: "Deployment", Name: "checkout"}
 	sc := &fakeScanner{

@@ -1,0 +1,61 @@
+{{- if and .Values.agent.enabled .Values.agent.rbac.create }}
+{{- /*
+  Cluster-scoped names are namespaced-suffixed so multiple releases (e.g. one
+  agent per team namespace) don't collide on a single cluster-wide object.
+*/}}
+{{- $roleName := printf "%s-%s" (include "lotsman.agent.fullname" .) .Release.Namespace | trunc 63 | trimSuffix "-" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $roleName }}
+  labels:
+    {{- include "lotsman.componentLabels" (dict "root" . "component" "agent") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["events", "pods"]
+    verbs: ["get", "list", "watch"]
+  # Cluster-scoped Node inspection (status/roles/version/capacity only — no
+  # secret data).
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Pod log streaming for the pod-inspection feature.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  # ReplicaSet get/list resolves Pod -> Deployment ownership and rebuilds a
+  # Deployment's image/tag history from its revision ReplicaSets.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  # ConfigMap values are not secret, so the ConfigMap browser is in the base role.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  {{- if .Values.agent.allowEnvReveal }}
+  # ⚠️ OPT-IN (agent.allowEnvReveal=true): cluster-wide Secret get/list powers the
+  # admin env-reveal + Secrets browser. This grants read of EVERY Secret in the
+  # cluster — apply ONLY in trusted single-tenant clusters.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $roleName }}
+  labels:
+    {{- include "lotsman.componentLabels" (dict "root" . "component" "agent") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $roleName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lotsman.agent.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

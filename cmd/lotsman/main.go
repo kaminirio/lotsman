@@ -1,43 +1,24 @@
-// Command lotsman is the operator CLI (scaffold). It will grow cobra-based
-// subcommands for managing clusters/agents and running
-// investigations from the terminal.
+// Command lotsman is the operator CLI: a cobra-based client for the Lotsman
+// control-plane REST API. It runs investigations and inspects incidents and
+// clusters from the terminal (the same surface the UI drives), so operators no
+// longer need raw curl.
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=...".
+// (See the Makefile / Dockerfile: -X main.version=$(VERSION).)
 var version = "dev"
 
 func main() {
-	flag.Usage = usage
-	flag.Parse()
-
-	args := flag.Args()
-	if len(args) == 0 {
-		usage()
-		os.Exit(2)
+	if err := newRootCmd().Execute(); err != nil {
+		// Errors are already routed to stderr with a non-zero exit; keep the
+		// message terse and consistent. Usage is silenced on runtime errors
+		// (SilenceUsage/SilenceErrors on the root command).
+		fmt.Fprintln(os.Stderr, "lotsman: "+err.Error())
+		os.Exit(1)
 	}
-
-	switch args[0] {
-	case "version":
-		fmt.Printf("lotsman %s\n", version)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %q\n\n", args[0])
-		usage()
-		os.Exit(2)
-	}
-}
-
-func usage() {
-	fmt.Fprint(os.Stderr, `lotsman — Kubernetes monitoring & investigation CLI (scaffold)
-
-Usage:
-  lotsman <command>
-
-Commands:
-  version   Print the version
-`)
 }

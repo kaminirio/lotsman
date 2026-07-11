@@ -3,7 +3,7 @@ title: "Lotsman"
 type: project
 tags: [project, active, kubernetes, observability]
 created: 2026-06-21 13:30:00
-updated: 2026-06-24 16:14:46
+updated: 2026-07-11 17:58:00
 status: active
 timeline: [2026-06-21 -> ]
 ---
@@ -36,28 +36,34 @@ Self-hosted Kubernetes monitoring **and incident investigation** — a competito
 - [x] Multi-cluster validated — two k3d clusters (local + local-2) simultaneous; `GET /api/v1/clusters` from live registry; `LOTSMAN_SEED=false` removes mock data in deployed envs (see [[Feature Multi-Cluster and Mock Removal 2026-06-22]])
 - [x] Improve pass: engine test coverage, API hardening, hot-path perf, CVE remediation — 239 tests pass `-race`; `npm audit` 0 issues (see [[Improve Engine Hardening and CVE Remediation 2026-06-24]])
 - [x] Config-driven strong RBAC: subject + group bindings in `LOTSMAN_SSO_CONFIG`; deny-by-default; cluster-wide vs namespace-scope fix; admin inspector API; UI admin page — 293 tests pass `-race` (see [[Feature Strong RBAC Config-Driven 2026-06-24]])
+- [x] Backlog improvement campaign (Waves 0-3, 2026-07-11): corrected stale scaffold docs; CI security/lint/race gating; agent fail-closed auth; rate limiting; incident pagination + RBAC-filter fix; versioned migrations; metrics wired into the correlation timeline; watch-event push path wired (poll-feed); UI tests/lint/live-updates/error-boundaries; cobra CLI; Helm chart + install guide; OpenAPI spec; retry/backoff, SSRF hardening, sliding sessions, CORS, a11y — see [[Backlog Improvement Campaign Waves 0-3 2026-07-11]]
+- [x] Metric detector signals in investigation timeline (PromQL/VictoriaMetrics) — closed by the 2026-07-11 campaign (ENG-1)
+- [x] Pagination on resource list pages — incident-list pagination closed (API-1); other resource list pages not yet covered
 - [ ] Persist RBAC bindings to Postgres (`bindings` table) + runtime grant/revoke admin API
-- [ ] Metric detector signals in investigation timeline (PromQL/VictoriaMetrics)
-- [ ] mTLS for gRPC agent transport (production-ready)
+- [ ] mTLS for gRPC agent transport (production-ready) — agent token enforcement is now fail-closed, but the transport itself remains plaintext
 - [ ] Pod log content scrubbing (secret-pattern redaction)
-- [ ] Pagination on resource list pages (cursor/limit — large clusters exhaust single-call responses)
+- [ ] Durable/HA session revocation store (Redis/PG-backed) — sliding-session lineage revocation landed 2026-07-11, but the store itself is still in-memory per-replica
+- [ ] True Kubernetes informer/watch for the agent (current watch-push path is a poll-feed)
 - [ ] Cluster health status endpoint (agent version, last-seen, health) in cluster selector UI
 
-## Security Posture (as of 2026-06-24)
+## Security Posture (as of 2026-07-11)
 
 The Secrets/Certificates browser and admin env-reveal require the agent to read secrets cluster-wide. This is gated behind:
 
 1. Opt-in RBAC overlay `deploy/local/k8s/21-agent-rbac-reveal.yaml` (not applied by default).
 2. `LOTSMAN_ALLOW_ENV_REVEAL=1` in agent environment (default off).
 
-Access control is now **deny-by-default**: authenticated users with no binding are denied on every API call. Bindings are declared in `LOTSMAN_SSO_CONFIG` as subject (GitHub login) or group (org/team slug) entries with explicit cluster and namespace scope.
+Access control is **deny-by-default**: authenticated users with no binding are denied on every API call. Bindings are declared in `LOTSMAN_SSO_CONFIG` as subject (GitHub login) or group (org/team slug) entries with explicit cluster and namespace scope. The 2026-07-11 campaign added: fail-closed agent enrollment (empty token no longer accepted as a wildcard), per-IP rate limiting on the OAuth handshake and `/investigate`, expanded secret/PII redaction pattern coverage, deepened SSRF validation, and sliding sessions with lineage-based revocation (24h absolute cap). See [[Backlog Improvement Campaign Waves 0-3 2026-07-11]].
 
 Remaining open issues before any shared/production deployment:
 
 - Pod logs are unscrubbed — `CanView` gates access but content is not sanitized.
 - UI value masking is shoulder-surf protection only — the API has already delivered the value.
-- Group membership snapshot in the JWT is stale until re-login (~8 h).
+- Group membership snapshot in the JWT is stale until re-login.
 - Bindings are config-file-only — no runtime mutation without a server restart (deferred to Postgres store).
+- Agent link mTLS is still open — transport is plaintext even though token enrollment is now fail-closed.
+- Session revocation store is in-memory per-replica — no HA-shared revocation yet.
+- The Trivy release scan added in this campaign is report-only; it does not yet gate build/push.
 
 ## Decisions & Notes
 
@@ -66,6 +72,7 @@ Remaining open issues before any shared/production deployment:
 - Change-first root-cause ranking (ADR-0008).
 - `LOTSMAN_SEED` flag (default `true`) gates seeded sample data; set `false` in deployed envs — supersedes the prior "remove store.Seed once Postgres is active" note.
 - Status: **full-featured platform (multi-cluster, live on k3d)** — 293 tests across 24+ packages (`-race` clean); Go build/vet/gofmt clean; UI builds and exports clean; `npm audit` 0 issues.
+- 2026-07-11: docs corrected to stop describing the platform as a stubbed scaffold (they had drifted behind the implementation); a `BACKLOG.md` at the repo root now tracks prioritized remaining work in P1/P2/P3 waves.
 
 ## Relationships & Links
 
@@ -73,4 +80,5 @@ Remaining open issues before any shared/production deployment:
 - **Dev toolkit:** [[Development Skills]] — installed agent skills mapped to each subsystem
 - **Feature reports:** [[Feature Source Adapter Implementation 2026-06-21]], [[Feature Platform Foundation 2026-06-21]], [[Feature Pod Inspection 2026-06-21]], [[Feature Kubernetes Resource Inspection 2026-06-22]], [[Feature Lens UI Redesign 2026-06-22]], [[Feature LLM Incident Explainer 2026-06-22]], [[Feature Multi-Cluster and Mock Removal 2026-06-22]], [[Feature Strong RBAC Config-Driven 2026-06-24]]
 - **Improve pass report:** [[Improve Engine Hardening and CVE Remediation 2026-06-24]]
+- **Backlog campaign report:** [[Backlog Improvement Campaign Waves 0-3 2026-07-11]]
 - **Sources:** `docs/ARCHITECTURE.md`, `docs/adr/`

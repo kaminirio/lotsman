@@ -152,7 +152,7 @@ export function parseLogfmt(line: string): LogField[] | null {
 
     if (i < n && line[i] === '=') {
       i++ // consume '='
-      let value = ''
+      let value: string
       if (i < n && line[i] === '"') {
         // Quoted value: read until the closing unescaped quote.
         i++ // opening quote

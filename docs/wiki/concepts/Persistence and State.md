@@ -3,7 +3,7 @@ title: "Persistence and State"
 type: concept
 tags: [concept, architecture, postgres, store]
 created: 2026-06-21 16:08:49
-updated: 2026-06-21 16:08:49
+updated: 2026-07-11 17:58:00
 status: current
 aliases: ["Store", "Postgres Store", "Query-Through"]
 ---
@@ -26,12 +26,16 @@ Telemetry (Loki logs, VictoriaMetrics metrics, ArgoCD deploy history, Kubernetes
 
 ## PostgresStore (`internal/store/postgres.go`)
 
-- **Migrations:** `internal/store/migrations/0001_init.sql` — idempotent `CREATE TABLE IF NOT EXISTS` for `incidents` and `clusters`. Run automatically on `NewPostgresStore`.
+- **Versioned migrations (2026-07-11 campaign):** the old scheme re-applied every embedded `CREATE TABLE IF NOT EXISTS` file on every startup with no version tracking. Replaced with a versioned migrator: a `schema_migrations` table tracks applied versions, and `pg_advisory_lock` guards migration application so concurrent replica startups can't race each other into a crash loop (a race was caught and fixed in code review during that campaign). `ALTER`/backfill/destructive migrations are now possible. See [[Backlog Improvement Campaign Waves 0-3 2026-07-11]].
 - **JSONB for evolving fields:** `resource`, `timeline`, and `hypotheses` are stored as JSONB to avoid constant schema migrations as the `model.Incident` shape evolves.
 - **UPSERTs:** `UpsertIncident` / `UpsertCluster` on conflict-update; `GetIncident` returns `store.ErrNotFound` on miss.
-- **Queries:** `ListIncidents` supports `cluster`, `namespace`, `status` filters; `opened_at DESC`; configurable `limit`.
+- **Queries:** `ListIncidents` supports `cluster`, `namespace`, `status` filters; `opened_at DESC`; configurable `limit`, and now caps the scan when `limit == 0` (was an unbounded `SELECT`).
 - **Pool lifecycle:** opened in `NewPostgresStore`; `pool.Close()` called in `controlplane.Shutdown`.
 - **Dependency:** `github.com/jackc/pgx/v5`.
+
+## Cluster State Persistence (2026-07-11 campaign)
+
+`SaveCluster` was previously only called from the seed path — live agent connect/disconnect and direct-mode clusters never persisted, so `handleListClusters` had to union the registry at read time and restart/history/region for real clusters was lost. Cluster state is now persisted on real agent connect. See [[Agent Control Plane Topology]] and [[Backlog Improvement Campaign Waves 0-3 2026-07-11]].
 
 ## Wiring in Control Plane (`internal/controlplane/controlplane.go`)
 
@@ -57,5 +61,6 @@ Used when `LOTSMAN_DATABASE_URL` is absent. `store.Seed(st)` pre-populates a sam
 - **Parent concept:** [[Lotsman]]
 - **Related:** [[Source-Agnostic Adapters]], [[Correlation Engine]], [[Authentication and RBAC]]
 - **Implementation report:** [[Feature Platform Foundation 2026-06-21]]
+- **Backlog campaign report:** [[Backlog Improvement Campaign Waves 0-3 2026-07-11]] (versioned migrator, cluster-state persistence on connect, `ListIncidents` cap)
 - **Relevant skills:** `golang-database` (pgx patterns), `wshobson/agents@postgresql-table-design` — see [[Development Skills]]
 - **Sources:** `internal/store/`, `docs/adr/0004-query-through-telemetry.md`, `docs/adr/0005-postgres-store.md`

@@ -1,0 +1,53 @@
+Lotsman {{ .Chart.AppVersion }} has been {{ .Release.IsInstall | ternary "installed" "upgraded" }} as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+{{- if .Values.controlPlane.enabled }}
+
+Control plane
+-------------
+{{- if .Values.controlPlane.ingress.enabled }}
+UI / API is exposed via Ingress:
+{{- range .Values.controlPlane.ingress.hosts }}
+  http{{ if $.Values.controlPlane.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else if eq .Values.controlPlane.service.type "ClusterIP" }}
+Reach the UI / API by port-forwarding:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "lotsman.controlPlane.fullname" . }} 8080:{{ .Values.controlPlane.service.port }}
+  open http://localhost:8080
+{{- end }}
+
+Agent gateway Service ({{ .Values.controlPlane.gatewayService.type }}) on port {{ .Values.controlPlane.gatewayService.port }}:
+  svc/{{ include "lotsman.controlPlane.fullname" . }}-gateway
+{{- if eq .Values.controlPlane.gatewayService.type "ClusterIP" }}
+  (ClusterIP — only agents in THIS cluster can reach it. Use LoadBalancer or
+   NodePort to admit agents from other clusters. See docs/INSTALL.md.)
+{{- else if eq .Values.controlPlane.gatewayService.type "LoadBalancer" }}
+  Find the external address:
+    kubectl -n {{ .Release.Namespace }} get svc {{ include "lotsman.controlPlane.fullname" . }}-gateway -w
+  Point remote agents at <EXTERNAL-IP>:{{ .Values.controlPlane.gatewayService.port }}
+{{- else if eq .Values.controlPlane.gatewayService.type "NodePort" }}
+  Point remote agents at <NODE-IP>:{{ .Values.controlPlane.gatewayService.nodePort | default "<assigned-nodeport>" }}
+{{- end }}
+
+{{- if .Values.controlPlane.directMode.enabled }}
+
+Mode: DIRECT (agentless) — the control plane queries this cluster's backends itself.
+{{- else }}
+
+Mode: AGENT — waiting for agents to dial in with the shared token.
+{{- end }}
+{{- end }}
+
+{{- if .Values.agent.enabled }}
+
+Agent
+-----
+Registering as cluster "{{ .Values.agent.cluster }}", dialing OUT to:
+  {{ include "lotsman.agent.controlPlaneAddr" . }}
+{{- if .Values.agent.allowEnvReveal }}
+
+⚠️  agent.allowEnvReveal=true: this agent has cluster-wide Secret read. Ensure the
+    cluster is trusted and single-tenant.
+{{- end }}
+{{- end }}
+
+Full deployment guide: docs/INSTALL.md

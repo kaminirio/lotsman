@@ -32,6 +32,11 @@ services:
       LOTSMAN_DATABASE_URL: "postgres://lotsman:lotsman@postgres:5432/lotsman?sslmode=disable"
       LOTSMAN_DIRECT_MODE: "1"
       LOTSMAN_CLUSTER: "local"
+      # Local dev only: the gateway is fail-closed without an enrollment token
+      # (SEC-1). Direct mode expects no agents, so opt into the insecure
+      # accept-any mode here to keep startup clean. Production sets a real
+      # LOTSMAN_AGENT_TOKEN instead (see deploy/local/k8s).
+      LOTSMAN_AGENT_ALLOW_INSECURE: "1"
       # In core mode these hosts don't resolve and the adapters fail gracefully;
       # under `--profile full` they point at the telemetry services below.
       LOTSMAN_LOKI_URL: "http://loki:3100"
@@ -39,7 +44,9 @@ services:
       LOTSMAN_ARGOCD_URL: "http://demo:8081"
       LOTSMAN_ARGOCD_TOKEN: "local-demo-token"
     depends_on:
-      - postgres # only postgres, so a core `up` doesn't pull in the full profile
+      postgres: # only postgres, so a core `up` doesn't pull in the full profile
+        condition: service_healthy # wait for pg_isready — the control plane pings at startup
+    restart: on-failure
 
   postgres:
     image: postgres:17-alpine

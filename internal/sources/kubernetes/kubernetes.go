@@ -38,6 +38,17 @@ const podLogsCap = 1 << 20 // 1 MiB
 // defaultTailLines is the log tail used when a PodLogsQuery requests <= 0 lines.
 const defaultTailLines int64 = 200
 
+// client-go rate-limit and timeout defaults applied to every rest.Config
+// (SRC-5). client-go's built-in client throttles at QPS 5 / Burst 10 and sets no
+// request timeout: too slow for an agent that lists workloads/pods/events across
+// many namespaces, and unsafe against an unresponsive API server. These raise the
+// ceiling modestly and bound every request.
+const (
+	clientQPS     = 20
+	clientBurst   = 30
+	clientTimeout = 30 * time.Second
+)
+
 // Client reads Kubernetes resource state + events. Runs inside the agent, using
 // the pod's in-cluster ServiceAccount (or a kubeconfig in direct mode).
 //
@@ -97,6 +108,21 @@ func (c *Client) clientset() (kubernetes.Interface, error) {
 }
 
 func (c *Client) restConfig() (*rest.Config, error) {
+	cfg, err := c.baseConfig()
+	if err != nil {
+		return nil, err
+	}
+	// Apply sane rate-limit and timeout defaults to whichever config source we
+	// resolved (SRC-5).
+	cfg.QPS = clientQPS
+	cfg.Burst = clientBurst
+	cfg.Timeout = clientTimeout
+	return cfg, nil
+}
+
+// baseConfig resolves the raw rest.Config from in-cluster config or the
+// configured kubeconfig, before restConfig applies QPS/Burst/Timeout tuning.
+func (c *Client) baseConfig() (*rest.Config, error) {
 	if c.kubeconfigPath == "" {
 		cfg, err := rest.InClusterConfig()
 		if err != nil {
@@ -1023,6 +1049,105 @@ func parseCertPEM(pemBytes []byte, now time.Time) *model.CertInfo {
 		info.Serial = cert.SerialNumber.String()
 	}
 	return info
+}
+
+// defaultWatchInterval is the poll cadence WatchEvents uses when the caller
+// passes a non-positive interval.
+const defaultWatchInterval = 10 * time.Second
+
+// watchLookbackFactor widens each poll's query window past the poll interval so
+// events created between two polls are not missed at the seam. Duplicates across
+// overlapping windows are suppressed by the seen-set.
+const watchLookbackFactor = 3
+
+// WatchEvents returns a stream of NEW event Signals for this cluster, emitting
+// each Kubernetes event at most once. It is the agent-side producer that feeds
+// the control-plane push path (LINK-1): every emitted Signal is streamed up the
+// agent link and routed into incident detection, so a failure surfaces within a
+// poll interval instead of waiting for the 30s scan tick.
+//
+// This is a minimal-viable poll-feed, not a true watch: it periodically calls
+// the adapter's own Events() over a short trailing window and emits only events
+// unseen since the last poll (deduplicated by a stable identity key). It emits
+// only Warning-or-worse signals, so benign Normal events never cross the wire.
+// The returned channel is closed when ctx is cancelled (the per-connection
+// streamCtx the dialer's pushLoop supplies), so the goroutine never leaks across
+// reconnects.
+//
+// TODO(LINK-1): upgrade to a client-go informer watch (SharedInformerFactory on
+// core/v1 Events) for true push semantics and lower latency; the adapter grew a
+// lifecycle-free contract deliberately (see the package doc), so an informer
+// needs a Start/Stop seam this method's ctx can drive.
+func (c *Client) WatchEvents(ctx context.Context, interval time.Duration) <-chan model.Signal {
+	if interval <= 0 {
+		interval = defaultWatchInterval
+	}
+	out := make(chan model.Signal)
+	go func() {
+		defer close(out)
+		// seen maps an event identity to when we last observed it, so a duplicate
+		// returned by overlapping poll windows is not re-emitted. Entries older than
+		// the lookback window are pruned each poll to bound the map.
+		seen := make(map[string]time.Time)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		lookback := time.Duration(watchLookbackFactor) * interval
+		poll := func() bool {
+			now := time.Now()
+			// Half-open [now-lookback, ∞): End zero is unbounded, so events stamped
+			// slightly in the future (clock skew) are still captured.
+			q := sources.EventQuery{Range: sources.TimeRange{Start: now.Add(-lookback)}}
+			sigs, err := c.Events(ctx, q)
+			if err != nil {
+				return ctx.Err() == nil // transient: keep polling unless ctx is done
+			}
+			for _, s := range sigs {
+				if s.Severity < model.SeverityWarning {
+					continue
+				}
+				key := eventSignalKey(s)
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = s.Timestamp
+				select {
+				case out <- s:
+				case <-ctx.Done():
+					return false
+				}
+			}
+			for k, ts := range seen {
+				if now.Sub(ts) > lookback {
+					delete(seen, k)
+				}
+			}
+			return true
+		}
+
+		for {
+			if !poll() {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return out
+}
+
+// eventSignalKey is a stable identity for an event Signal, used by WatchEvents to
+// emit each Kubernetes event exactly once across overlapping poll windows.
+func eventSignalKey(s model.Signal) string {
+	r := s.Resource
+	return strings.Join([]string{
+		r.Cluster, r.Namespace, r.Kind, r.Name,
+		s.Title, s.Message,
+		strconv.FormatInt(s.Timestamp.UnixNano(), 10),
+	}, "\x1f")
 }
 
 var _ sources.ClusterSource = (*Client)(nil)

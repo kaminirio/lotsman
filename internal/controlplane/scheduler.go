@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"lotsman/internal/agentlink"
 	"lotsman/internal/engine"
 	"lotsman/internal/engine/detector"
 	"lotsman/internal/events"
@@ -21,10 +22,20 @@ type clusterLister interface {
 }
 
 // scanner detects candidates and investigates them into incidents in a single
-// pass, resolving each cluster's provider once. *engine.Engine implements it;
+// pass, resolving each cluster's provider once. It also investigates a single
+// resource on demand — the entry point the push path uses to promote a
+// server-pushed watch signal into an incident. *engine.Engine implements both;
 // tests supply a fake.
 type scanner interface {
 	ScanAndInvestigate(ctx context.Context, cluster string, scope detector.Scope) ([]*model.Incident, error)
+	Investigate(ctx context.Context, ref model.ResourceRef, around time.Time, window time.Duration) (*model.Incident, error)
+}
+
+// pushedSignalSource supplies agent-pushed watch Events. *Registry implements it;
+// a nil/absent source (e.g. a test's fakeLister) simply disables the push path,
+// leaving the poll scheduler as the sole detector.
+type pushedSignalSource interface {
+	PushedEvents() <-chan agentlink.Event
 }
 
 // Scheduler periodically scans every registered cluster, investigates each
@@ -76,10 +87,17 @@ func NewScheduler(clusters clusterLister, eng scanner, st store.Store, bus *even
 }
 
 // Run blocks, scanning on each tick until ctx is cancelled. It runs an initial
-// pass immediately so live data appears without waiting a full interval.
+// pass immediately so live data appears without waiting a full interval. When the
+// cluster source also pushes agent watch signals, Run starts a consumer that
+// promotes those into incidents between ticks (push is additive/faster; the poll
+// loop below is the safety net).
 func (s *Scheduler) Run(ctx context.Context) {
 	s.logger.Info("incident scheduler started", "interval", s.interval)
 	defer s.logger.Info("incident scheduler stopped")
+
+	if src, ok := s.clusters.(pushedSignalSource); ok {
+		go s.consumePushedSignals(ctx, src.PushedEvents())
+	}
 
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
@@ -93,6 +111,44 @@ func (s *Scheduler) Run(ctx context.Context) {
 			s.tick(ctx)
 		}
 	}
+}
+
+// consumePushedSignals drains agent-pushed watch Events and routes each into
+// incident detection until ctx is cancelled (no leak: the loop exits on ctx.Done
+// or when the feed closes).
+func (s *Scheduler) consumePushedSignals(ctx context.Context, feed <-chan agentlink.Event) {
+	s.logger.Info("incident push consumer started")
+	defer s.logger.Info("incident push consumer stopped")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-feed:
+			if !ok {
+				return
+			}
+			s.handlePushedSignal(ctx, ev)
+		}
+	}
+}
+
+// handlePushedSignal promotes one server-pushed watch signal into an incident.
+// It gates on severity so the push path opens incidents for the same class of
+// signals the periodic KubernetesDetector does (SeverityError and above),
+// investigates the affected resource around the signal's timestamp, and runs the
+// result through the same dedupe/persist/publish path as a polled incident — so
+// a push and a later poll of the same failure don't double-publish.
+func (s *Scheduler) handlePushedSignal(ctx context.Context, ev agentlink.Event) {
+	if ev.Signal.Severity < model.SeverityError {
+		return
+	}
+	inc, err := s.eng.Investigate(ctx, ev.Signal.Resource, ev.Signal.Timestamp, 0)
+	if err != nil {
+		s.logger.Debug("push investigate failed", "cluster", ev.Cluster, "resource", ev.Signal.Resource.Key(), "err", err)
+		return
+	}
+	s.publishIncident(ctx, inc)
+	s.logger.Debug("push-triggered investigation", "cluster", ev.Cluster, "resource", ev.Signal.Resource.Key())
 }
 
 // tick runs one detection pass across all clusters.
@@ -139,16 +195,23 @@ func (s *Scheduler) scanCluster(ctx context.Context, cluster string, scope detec
 		if ctx.Err() != nil {
 			return
 		}
-		if !s.shouldPublish(inc) {
-			continue
-		}
-		if err := s.store.SaveIncident(ctx, inc); err != nil {
-			s.logger.Warn("save incident failed", "id", inc.ID, "err", err)
-			continue
-		}
-		s.bus.Publish(inc)
-		s.logger.Info("incident detected", "id", inc.ID, "resource", inc.Resource.Key(), "severity", inc.Severity)
+		s.publishIncident(ctx, inc)
 	}
+}
+
+// publishIncident persists and publishes an incident if it is new or changed
+// since it was last published (dedupe). Shared by the poll scan loop and the push
+// consumer so both paths dedupe against one another.
+func (s *Scheduler) publishIncident(ctx context.Context, inc *model.Incident) {
+	if !s.shouldPublish(inc) {
+		return
+	}
+	if err := s.store.SaveIncident(ctx, inc); err != nil {
+		s.logger.Warn("save incident failed", "id", inc.ID, "err", err)
+		return
+	}
+	s.bus.Publish(inc)
+	s.logger.Info("incident detected", "id", inc.ID, "resource", inc.Resource.Key(), "severity", inc.Severity)
 }
 
 // shouldPublish reports whether inc is new or changed since it was last

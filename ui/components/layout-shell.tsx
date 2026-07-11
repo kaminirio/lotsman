@@ -177,6 +177,18 @@ export function LayoutShell({ children }: { children: ReactNode }) {
   return (
     <ClusterProvider>
       <div className="relative z-10 flex h-screen w-full">
+        {/* Skip-to-content link (UI-5): visually hidden until focused, lets
+            keyboard users jump past the sidebar nav to the main landmark. */}
+        <a
+          href="#main-content"
+          className={[
+            'sr-only rounded-md bg-[var(--surface)] px-3 py-1.5 text-[13px] font-medium text-slate-100',
+            'focus:not-sr-only focus:absolute focus:left-4 focus:top-3 focus:z-50',
+            focusRingCls,
+          ].join(' ')}
+        >
+          Skip to content
+        </a>
         {/* Sidebar — slightly darker than the content area (Lens-style). */}
         <aside className="flex w-60 shrink-0 flex-col border-r border-slate-800 bg-[var(--bg-deep)]">
           {/* Wordmark */}
@@ -213,8 +225,15 @@ export function LayoutShell({ children }: { children: ReactNode }) {
           </div>
         </aside>
 
-        {/* Content — each view owns its toolbar + body. */}
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--bg-base)]">{children}</main>
+        {/* Content — each view owns its toolbar + body. The `main` element is
+            the primary landmark; `id`/`tabIndex` make it the skip-link target. */}
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--bg-base)] focus:outline-none"
+        >
+          {children}
+        </main>
       </div>
     </ClusterProvider>
   )

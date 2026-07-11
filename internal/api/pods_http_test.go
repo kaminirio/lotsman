@@ -36,6 +36,7 @@ type stubClusterSource struct {
 	secrets         []model.SecretRef
 	secretDetail    model.SecretDetail
 	lastSecretQuery sources.SecretQuery
+	lastLogsQuery   sources.PodLogsQuery
 }
 
 func (s *stubClusterSource) Name() string { return "stub" }
@@ -55,6 +56,7 @@ func (s *stubClusterSource) ListPods(_ context.Context, q sources.PodQuery) ([]m
 	return s.pods, nil
 }
 func (s *stubClusterSource) PodLogs(_ context.Context, q sources.PodLogsQuery) (model.PodLogsResult, error) {
+	s.lastLogsQuery = q
 	return model.PodLogsResult{
 		Pod:       q.Resource.Pod,
 		Namespace: q.Resource.Namespace,
@@ -357,5 +359,57 @@ func TestGetPodLogs_Unauthenticated(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated logs: got %d, want 401", rec.Code)
+	}
+}
+
+// An oversized tail must be clamped to the ceiling before it reaches the source,
+// so tail=99999999 can't pull an unbounded log body (API-3).
+func TestGetPodLogs_TailClampedToMax(t *testing.T) {
+	src := &stubClusterSource{}
+	srv := podTestServer(t, testSSOConfig, src)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/prod/namespaces/demo/pods/api-1/logs?tail=99999999", nil)
+	req.SetPathValue("cluster", "prod")
+	req.SetPathValue("namespace", "demo")
+	req.SetPathValue("pod", "api-1")
+	req.AddCookie(mintCookie(t, "viewer-user"))
+	rec := httptest.NewRecorder()
+
+	srv.handleGetPodLogs(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get pod logs: got %d, want 200", rec.Code)
+	}
+	if src.lastLogsQuery.TailLines != podLogsMaxTail {
+		t.Fatalf("oversized tail not clamped: got %d, want %d", src.lastLogsQuery.TailLines, podLogsMaxTail)
+	}
+}
+
+// An absent tail must default (not 0/unbounded); a valid in-range tail is passed
+// through verbatim.
+func TestGetPodLogs_TailDefaultAndPassthrough(t *testing.T) {
+	src := &stubClusterSource{}
+	srv := podTestServer(t, testSSOConfig, src)
+
+	// Absent -> default.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/prod/namespaces/demo/pods/api-1/logs", nil)
+	req.SetPathValue("cluster", "prod")
+	req.SetPathValue("namespace", "demo")
+	req.SetPathValue("pod", "api-1")
+	req.AddCookie(mintCookie(t, "viewer-user"))
+	srv.handleGetPodLogs(httptest.NewRecorder(), req)
+	if src.lastLogsQuery.TailLines != podLogsDefaultTail {
+		t.Fatalf("absent tail: got %d, want default %d", src.lastLogsQuery.TailLines, podLogsDefaultTail)
+	}
+
+	// In-range value -> passed through.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/clusters/prod/namespaces/demo/pods/api-1/logs?tail=250", nil)
+	req.SetPathValue("cluster", "prod")
+	req.SetPathValue("namespace", "demo")
+	req.SetPathValue("pod", "api-1")
+	req.AddCookie(mintCookie(t, "viewer-user"))
+	srv.handleGetPodLogs(httptest.NewRecorder(), req)
+	if src.lastLogsQuery.TailLines != 250 {
+		t.Fatalf("in-range tail: got %d, want 250", src.lastLogsQuery.TailLines)
 	}
 }

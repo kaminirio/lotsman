@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -29,27 +30,58 @@ const queryTimeout = 30 * time.Second
 // against an abusive/unauthenticated peer opening unbounded streams.
 const maxAgentStreams = 64
 
+// envAllowInsecureAgents is the explicit local-dev opt-in that permits the
+// legacy "accept any non-empty token" behavior when no enrollment token is
+// configured. Default (unset) is fail-closed: the gateway refuses to start and
+// rejects agent connections rather than trusting any caller that can reach the
+// port. See SEC-1.
+const envAllowInsecureAgents = "LOTSMAN_AGENT_ALLOW_INSECURE"
+
+// allowInsecureAgentsFromEnv reports whether the operator explicitly opted into
+// the insecure accept-any-token dev mode via LOTSMAN_AGENT_ALLOW_INSECURE.
+func allowInsecureAgentsFromEnv() bool {
+	switch os.Getenv(envAllowInsecureAgents) {
+	case "1", "true", "TRUE", "True", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // Gateway is the control-plane side: it accepts inbound agent connections and
 // exposes each as a Link via the OnConnect callback. The control plane's cluster
 // registry consumes those Links.
 type Gateway struct {
-	addr         string
-	token        string // expected agent enrollment token ("" = accept any non-empty, dev only)
-	logger       *slog.Logger
-	onConnect    func(Link)
-	onDisconnect func(Link)
+	addr  string
+	token string // expected agent enrollment token ("" = none configured)
+	// allowInsecure permits the legacy accept-any-non-empty-token behavior when
+	// token is "". Default false (fail-closed); enabled only via the explicit
+	// LOTSMAN_AGENT_ALLOW_INSECURE opt-in for local dev. See SEC-1.
+	allowInsecure bool
+	logger        *slog.Logger
+	onConnect     func(Link)
+	onDisconnect  func(Link)
 
 	srv *grpc.Server
 	pb.UnimplementedAgentServiceServer
 }
 
 // NewGateway constructs the agent gateway. token is the shared enrollment secret
-// every agent must present in its Hello; an empty token keeps the local-dev
-// behavior (accept any non-empty token) and logs a warning at Start. onConnect is
-// called once per agent that successfully connects and authenticates; onDisconnect
-// once per such agent when its stream ends (nil is allowed).
+// every agent must present in its Hello. When token is empty the gateway is
+// fail-closed by default (SEC-1): it refuses to start and rejects agents, unless
+// the operator sets LOTSMAN_AGENT_ALLOW_INSECURE=1 to re-enable the legacy
+// local-dev "accept any non-empty token" behavior. onConnect is called once per
+// agent that successfully connects and authenticates; onDisconnect once per such
+// agent when its stream ends (nil is allowed).
 func NewGateway(addr, token string, logger *slog.Logger, onConnect, onDisconnect func(Link)) *Gateway {
-	return &Gateway{addr: addr, token: token, logger: logger, onConnect: onConnect, onDisconnect: onDisconnect}
+	return &Gateway{
+		addr:          addr,
+		token:         token,
+		allowInsecure: allowInsecureAgentsFromEnv(),
+		logger:        logger,
+		onConnect:     onConnect,
+		onDisconnect:  onDisconnect,
+	}
 }
 
 // Start listens for agent connections and blocks until ctx is done or Serve
@@ -57,14 +89,23 @@ func NewGateway(addr, token string, logger *slog.Logger, onConnect, onDisconnect
 // credentials.NewTLS(...) with a client-CA-verified config; for local dev the
 // link is plaintext and Hello.token gates enrollment.
 func (g *Gateway) Start(ctx context.Context) error {
+	// Fail closed: without a configured enrollment token, any caller that can
+	// reach the port could register an arbitrary cluster and receive proxied
+	// user queries. Refuse to start unless the operator explicitly opted into the
+	// insecure local-dev mode (SEC-1).
+	if g.token == "" && !g.allowInsecure {
+		return fmt.Errorf("agentlink: refusing to start: no enrollment token configured (set LOTSMAN_AGENT_TOKEN); for local dev only, set %s=1 to accept any non-empty token", envAllowInsecureAgents)
+	}
+
 	lis, err := net.Listen("tcp", g.addr)
 	if err != nil {
 		return fmt.Errorf("agentlink: gateway listen on %s: %w", g.addr, err)
 	}
 
-	// TODO(mTLS): grpc.Creds(credentials.NewTLS(serverTLSConfig)) once the
-	// agent enrollment CA lands (ADR-0002). Until then the link is plaintext and
-	// Hello.token gates enrollment; harden the server against abusive peers.
+	// TODO(SEC-1): replace with mTLS credentials (per-cluster client certs).
+	// grpc.Creds(credentials.NewTLS(serverTLSConfig)) once the agent enrollment
+	// CA lands (ADR-0002). Until then the link is plaintext and Hello.token gates
+	// enrollment; harden the server against abusive peers.
 	g.srv = grpc.NewServer(
 		grpc.MaxConcurrentStreams(maxAgentStreams),
 		grpc.ConnectionTimeout(15*time.Second),
@@ -80,7 +121,9 @@ func (g *Gateway) Start(ctx context.Context) error {
 	pb.RegisterAgentServiceServer(g.srv, g)
 
 	if g.token == "" {
-		g.logger.Warn("agent gateway has no LOTSMAN_AGENT_TOKEN configured; accepting any non-empty token (dev only — set a token or enable mTLS for production)")
+		g.logger.Warn("agent gateway running in INSECURE mode (LOTSMAN_AGENT_ALLOW_INSECURE set): accepting ANY non-empty enrollment token — local dev only, never in production")
+	} else {
+		g.logger.Info("agent gateway enrollment: token-gated (constant-time compare)")
 	}
 	g.logger.Info("agent gateway listening", "addr", g.addr)
 
@@ -131,13 +174,21 @@ func (g *Gateway) Connect(stream pb.AgentService_ConnectServer) error {
 	}
 	// Enrollment auth. When a token is configured, require a constant-time match
 	// (so the gateway can't be impersonated by any caller that can reach the
-	// port). When none is configured, fall back to the local-dev rule of "any
-	// non-empty token". In production mTLS carries identity and this becomes a
-	// CA/SPIFFE check (ADR-0002).
+	// port). When none is configured, fail closed (reject) unless the operator
+	// explicitly opted into the insecure local-dev "any non-empty token" mode
+	// (SEC-1). This mirrors the Start-time refusal as defense in depth for callers
+	// that register the gateway directly on a grpc.Server. In production mTLS
+	// carries identity and this becomes a CA/SPIFFE check (ADR-0002).
 	if hello.GetToken() == "" {
 		return status.Error(codes.Unauthenticated, "agentlink: hello missing token")
 	}
-	if g.token != "" && subtle.ConstantTimeCompare([]byte(hello.GetToken()), []byte(g.token)) != 1 {
+	if g.token == "" {
+		if !g.allowInsecure {
+			g.logger.Warn("agent rejected: gateway has no enrollment token and insecure mode is disabled", "cluster", hello.GetCluster())
+			return status.Error(codes.Unauthenticated, "agentlink: gateway misconfigured (no enrollment token); refusing connection")
+		}
+		// Insecure dev opt-in: any non-empty token (checked above) is accepted.
+	} else if subtle.ConstantTimeCompare([]byte(hello.GetToken()), []byte(g.token)) != 1 {
 		g.logger.Warn("agent rejected: invalid enrollment token", "cluster", hello.GetCluster())
 		return status.Error(codes.Unauthenticated, "agentlink: invalid enrollment token")
 	}

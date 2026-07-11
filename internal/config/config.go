@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -15,9 +16,12 @@ type Server struct {
 	Addr        string // HTTP listen address for the REST API + embedded UI
 	GatewayAddr string // gRPC listen address for incoming agent connections
 	// AgentToken is the shared enrollment secret an agent must present in its
-	// Hello to connect (LOTSMAN_AGENT_TOKEN). When empty, the gateway accepts any
-	// non-empty token (local-dev convenience) and logs a warning. mTLS replaces
-	// this with cert-based identity in production (ADR-0002).
+	// Hello to connect (LOTSMAN_AGENT_TOKEN). When empty, the gateway is
+	// fail-closed by default (SEC-1): it refuses to start and rejects agents,
+	// unless LOTSMAN_AGENT_ALLOW_INSECURE=1 re-enables the legacy local-dev
+	// "accept any non-empty token" behavior. mTLS replaces this with cert-based
+	// identity in production (ADR-0002). The gateway reads the insecure opt-in
+	// directly from the environment, so no additional field is threaded here.
 	AgentToken  string
 	DatabaseURL string // PostgreSQL DSN for control-plane state
 	SSOConfig   string // optional JSON SSO config (GitHub OAuth)
@@ -110,10 +114,23 @@ func LoadAgent(version string) Agent {
 
 // ValidateBackendURL checks an operator-configured backend/LLM URL at startup.
 // An empty value is allowed (the source is simply disabled). A non-empty value
-// must be a well-formed http/https URL whose host is not a link-local address —
-// blocking 169.254.169.254 and the rest of 169.254.0.0/16 so a typo'd or hostile
-// env var can't point a server-side fetch at cloud instance metadata (SSRF
-// hardening). Loopback is allowed (local-dev backends like an in-pod Ollama).
+// must be a well-formed http/https URL whose host is not — and does not resolve
+// to — a cloud-metadata / link-local address, so a typo'd or hostile env var
+// can't point a server-side fetch at instance metadata (169.254.169.254 and the
+// rest of 169.254.0.0/16). SSRF hardening (SEC-5):
+//
+//   - IP literals are checked directly (net.ParseIP normalizes IPv4-mapped IPv6
+//     forms like ::ffff:169.254.169.254, so those are covered too).
+//   - well-known metadata hostnames (metadata.google.internal, ...) are rejected
+//     by name.
+//   - other hostnames are best-effort resolved; if any resolved address is
+//     link-local — or is loopback for a name that isn't an explicit localhost —
+//     the URL is rejected (a non-localhost name pointing at 127/8 is a red flag).
+//
+// This stays best-effort: these are operator-supplied URLs (low risk) and a
+// resolution failure is not treated as fatal, so an air-gapped or DNS-less
+// startup still validates. A loopback IP literal and the explicit localhost names
+// remain allowed (local-dev backends like an in-pod Ollama).
 func ValidateBackendURL(name, raw string) error {
 	if raw == "" {
 		return nil
@@ -128,12 +145,71 @@ func ValidateBackendURL(name, raw string) error {
 	if u.Host == "" {
 		return fmt.Errorf("config: %s: URL %q has no host", name, raw)
 	}
-	if ip := net.ParseIP(u.Hostname()); ip != nil {
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-			return fmt.Errorf("config: %s: refusing link-local address %q (cloud metadata SSRF risk)", name, u.Hostname())
+
+	host := u.Hostname()
+	if isMetadataHostname(host) {
+		return fmt.Errorf("config: %s: refusing cloud-metadata hostname %q (SSRF risk)", name, host)
+	}
+
+	// IP literal: check it directly; loopback literals stay allowed for local dev.
+	if ip := net.ParseIP(host); ip != nil {
+		if reason := blockedIPReason(ip, false); reason != "" {
+			return fmt.Errorf("config: %s: refusing %s %q (SSRF risk)", name, reason, host)
+		}
+		return nil
+	}
+
+	// Explicit localhost names are allowed even though they resolve to loopback.
+	if isLocalhostName(host) {
+		return nil
+	}
+
+	// Hostname: best-effort resolve and reject if it lands on a blocked address.
+	ips, lookupErr := net.LookupIP(host)
+	if lookupErr != nil {
+		return nil // best-effort: don't fail validation on a resolution error
+	}
+	for _, ip := range ips {
+		if reason := blockedIPReason(ip, true); reason != "" {
+			return fmt.Errorf("config: %s: host %q resolves to %s %s (SSRF risk)", name, host, reason, ip)
 		}
 	}
 	return nil
+}
+
+// blockedIPReason returns a human-readable reason if ip must be refused, or "".
+// Link-local (which includes the 169.254.169.254 cloud-metadata address) is
+// always blocked. Loopback is blocked only when resolved is true — a non-explicit
+// hostname resolving to 127/8 is suspicious, while a loopback IP literal (or the
+// explicit localhost names handled by the caller) is a legitimate local-dev target.
+func blockedIPReason(ip net.IP, resolved bool) string {
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return "link-local/metadata address"
+	}
+	if resolved && ip.IsLoopback() {
+		return "loopback address"
+	}
+	return ""
+}
+
+// isMetadataHostname reports whether host is a well-known cloud instance-metadata
+// hostname (case-insensitive).
+func isMetadataHostname(host string) bool {
+	switch strings.ToLower(host) {
+	case "metadata.google.internal", "metadata", "instance-data", "instance-data.ec2.internal":
+		return true
+	}
+	return false
+}
+
+// isLocalhostName reports whether host is an explicit localhost name that is
+// deliberately allowed despite resolving to loopback (local-dev backends).
+func isLocalhostName(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "localhost.localdomain":
+		return true
+	}
+	return false
 }
 
 // envBool reports whether key is set to a truthy value ("1" or "true"). Anything

@@ -1,0 +1,31 @@
+apiVersion: v2
+name: lotsman
+description: >-
+  Self-hosted Kubernetes monitoring & incident investigation. Lotsman correlates
+  logs, metrics, and deployment changes on one timeline and ranks the probable
+  cause. This chart deploys the control plane (REST + embedded UI + agent gRPC
+  gateway) and, optionally, the in-cluster agent.
+type: application
+
+# Chart version — bump on every chart change (SemVer, independent of the app).
+version: 0.1.0
+
+# The Lotsman application version this chart ships by default. Matches the
+# container image tag used when `image.*.tag` is left empty. `edge` tracks the
+# latest build published from `main`; pin a released `vX.Y.Z` tag in production.
+appVersion: "edge"
+
+home: https://github.com/kaminirio/lotsman
+sources:
+  - https://github.com/kaminirio/lotsman
+keywords:
+  - kubernetes
+  - observability
+  - incident-response
+  - sre
+  - correlation
+maintainers:
+  - name: kaminirio
+    url: https://github.com/kaminirio
+annotations:
+  category: Monitoring

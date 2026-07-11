@@ -35,6 +35,10 @@ func newE2EHarness(t *testing.T, handler Handler, feed func(context.Context) <-c
 
 	linkCh := make(chan Link, 1)
 	gw := NewGateway("bufconn", "", logger, func(l Link) { linkCh <- l }, nil)
+	// The e2e harness exercises the accept-any-non-empty-token path, which is now
+	// gated behind the explicit insecure opt-in (SEC-1). See gateway_test.go for
+	// the fail-closed default and token-match paths.
+	gw.allowInsecure = true
 
 	srv := grpc.NewServer()
 	pb.RegisterAgentServiceServer(srv, gw)
@@ -166,6 +170,59 @@ func TestE2E_EventPush(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("event never arrived on Link.Events()")
+	}
+}
+
+// TestE2E_EventPushK8sSignalFidelity mirrors the real LINK-1 path: the agent-side
+// feed emits a Kubernetes-event Signal, which must traverse dialer -> gateway ->
+// Link.Events() intact — severity and resource included — so the control-plane
+// consumer that drains Link.Events() has what it needs to gate and investigate.
+func TestE2E_EventPushK8sSignalFidelity(t *testing.T) {
+	feedCh := make(chan Event, 1)
+	feed := func(ctx context.Context) <-chan Event {
+		out := make(chan Event)
+		go func() {
+			defer close(out)
+			select {
+			case ev := <-feedCh:
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+				}
+			case <-ctx.Done():
+			}
+		}()
+		return out
+	}
+	handler := func(_ context.Context, _ Request) Response { return Response{} }
+	h := newE2EHarness(t, handler, feed)
+	defer h.cleanup()
+
+	want := Event{
+		Cluster: "test-cluster",
+		Signal: model.Signal{
+			Kind:     model.SignalK8sEvent,
+			Severity: model.SeverityError,
+			Source:   "kubernetes",
+			Title:    "OOMKilling",
+			Resource: model.ResourceRef{Cluster: "test-cluster", Namespace: "prod", Kind: "Pod", Name: "api-0"},
+		},
+	}
+	feedCh <- want
+
+	select {
+	case got := <-h.link.Events():
+		if got.Cluster != want.Cluster {
+			t.Fatalf("cluster = %q, want %q", got.Cluster, want.Cluster)
+		}
+		if got.Signal.Kind != model.SignalK8sEvent || got.Signal.Severity != model.SeverityError {
+			t.Fatalf("signal kind/severity not preserved: %+v", got.Signal)
+		}
+		if got.Signal.Resource != want.Signal.Resource {
+			t.Fatalf("resource not preserved: got %+v want %+v", got.Signal.Resource, want.Signal.Resource)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("k8s event signal never arrived on Link.Events()")
 	}
 }
 

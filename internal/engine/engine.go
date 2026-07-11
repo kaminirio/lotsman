@@ -96,8 +96,8 @@ func (e *Engine) investigateWith(ctx context.Context, p sources.Provider, ref mo
 }
 
 // Scan runs all detectors over a cluster scope and returns candidate incidents.
-// A scheduler (not part of the scaffold) calls this periodically and promotes
-// candidates via Investigate.
+// The detector scheduler (controlplane.Scheduler) calls this periodically and
+// promotes candidates via Investigate.
 func (e *Engine) Scan(ctx context.Context, cluster string, scope detector.Scope) ([]detector.Candidate, error) {
 	p, err := e.resolver.Provider(cluster)
 	if err != nil {

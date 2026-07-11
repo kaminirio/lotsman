@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -38,6 +39,11 @@ var errForbidden = errors.New("forbidden")
 // the two are indistinguishable (no cross-tenant existence oracle).
 var errNotFound = errors.New("not found")
 
+// errUnauthenticated is written (as the standard {"error":...} envelope) when a
+// request to the JSON API surface has no valid session. It replaces the old
+// empty-body 401s so every /api/v1 error shares one shape (API-5).
+var errUnauthenticated = errors.New("unauthorized")
+
 // filterVisibleIncidents returns only the incidents the enforcer may view, by
 // each incident's cluster/namespace. A global-admin enforcer (the SSO-disabled
 // default) keeps every incident, so the list is unchanged without SSO.
@@ -62,7 +68,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	// Echo the User fields plus the RBAC summary the UI needs to gate admin-only
@@ -90,16 +96,70 @@ func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// incidentsDefaultLimit / incidentsMaxLimit bound the page size returned by the
+// incident list. The cap stops a client asking for an unbounded page.
+const (
+	incidentsDefaultLimit = 50
+	incidentsMaxLimit     = 200
+)
+
+// maxIncidentScan bounds how many (newest-first) incidents the list endpoint
+// pulls from the store before applying RBAC visibility and paginating. It exists
+// to cap memory: without it, ListIncidents with Limit==0 materializes the ENTIRE
+// incidents table on every request (the regression this replaces).
+//
+// It is deliberately a LARGE pre-filter scan cap, not a page limit: the page
+// limit must not be applied at the DB before RBAC, because RBAC removes rows the
+// caller can't see and would truncate a scoped viewer to fewer than a page (or
+// none) — the original truncation bug. maxIncidentScan sits far above any
+// realistic per-request visible set, so in practice a scoped viewer still sees
+// every visible incident. The residual caveat: a viewer whose visible incidents
+// are all OLDER than more than maxIncidentScan newer invisible incidents may not
+// see the oldest visible ones. Pushing the caller's cluster scope into the store
+// query would remove even that caveat, but is not possible here — incidents
+// reference clusters that are not necessarily present in the cluster registry the
+// handler can enumerate, and the RBAC enforcer exposes no way to list a viewer's
+// bound cluster scopes — so a scan cap is the bounded, non-truncating choice.
+const maxIncidentScan = 2000
+
+// knownIncidentStatus reports whether s is one of the model.IncidentStatus
+// lifecycle values, used to validate the incident-list ?status filter.
+func knownIncidentStatus(s model.IncidentStatus) bool {
+	switch s {
+	case model.IncidentOpen, model.IncidentInvestigating, model.IncidentResolved, model.IncidentClosed:
+		return true
+	}
+	return false
+}
+
 func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
+	}
+	limit, offset := parsePageParams(r, incidentsDefaultLimit, incidentsMaxLimit)
+
+	// Fetch a bounded, newest-first scan (cluster/status pushdown), then apply RBAC
+	// visibility, and only then paginate. maxIncidentScan bounds memory (Limit==0
+	// would materialize the whole table — the regression this replaces) while being
+	// large enough that RBAC + pagination still see every visible incident in
+	// practice. Applying the PAGE limit at the DB before the RBAC filter is the
+	// truncation bug this must not reintroduce: the limit would be consumed by rows
+	// the caller can't see, so a scoped viewer could get far fewer than a page of
+	// visible incidents (or none) even when more existed.
+	// Validate the optional ?status filter LENIENTLY, matching the events
+	// endpoint's defensive query parsing (and unlike investigate, which 400s): an
+	// unknown value is dropped rather than rejected, so a typo returns the
+	// unfiltered list instead of an error. Empty means "no status filter".
+	status := model.IncidentStatus(r.URL.Query().Get("status"))
+	if status != "" && !knownIncidentStatus(status) {
+		status = ""
 	}
 	f := store.IncidentFilter{
 		Cluster: r.URL.Query().Get("cluster"),
-		Status:  model.IncidentStatus(r.URL.Query().Get("status")),
-		Limit:   100,
+		Status:  status,
+		Limit:   maxIncidentScan,
 	}
 	incs, err := s.cfg.Store.ListIncidents(r.Context(), f)
 	if err != nil {
@@ -110,13 +170,48 @@ func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 	// one cluster never sees another's. Without SSO the enforcer is global admin
 	// and this keeps every incident.
 	visible := filterVisibleIncidents(s.cfg.Auth.Enforcer(user), incs)
-	writeJSON(w, http.StatusOK, visible)
+	writeJSON(w, http.StatusOK, paginate(visible, offset, limit))
+}
+
+// parsePageParams reads limit/offset query params defensively: non-numeric or
+// non-positive limit falls back to def; limit is capped at max; a negative or
+// garbage offset becomes 0. Mirrors the events endpoint's defensive parsing.
+func parsePageParams(r *http.Request, def, max int) (limit, offset int) {
+	limit = def
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > max {
+		limit = max
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	return limit, offset
+}
+
+// paginate returns the [offset, offset+limit) window of s, clamped to bounds. It
+// never returns nil for an in-range empty window (so the JSON stays []), and
+// never panics on an offset past the end.
+func paginate[T any](s []T, offset, limit int) []T {
+	if offset >= len(s) {
+		return []T{}
+	}
+	end := offset + limit
+	if end > len(s) {
+		end = len(s)
+	}
+	return s[offset:end]
 }
 
 func (s *Server) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	inc, err := s.cfg.Store.GetIncident(r.Context(), r.PathValue("id"))
@@ -153,7 +248,7 @@ func (s *Server) handleExplainIncident(w http.ResponseWriter, r *http.Request) {
 	clearWriteDeadline(w)
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	inc, err := s.cfg.Store.GetIncident(r.Context(), r.PathValue("id"))
@@ -182,6 +277,34 @@ func (s *Server) handleExplainIncident(w http.ResponseWriter, r *http.Request) {
 // strings, so 4 KiB is generous.
 const investigateMaxBody = 4096
 
+// maxRefFieldLen bounds each investigate resource-ref field. Kubernetes object
+// names and namespaces are DNS subdomains (<=253 chars); cluster and kind are
+// comfortably shorter, so one generous cap covers all four and rejects absurd
+// input before it reaches the engine.
+const maxRefFieldLen = 253
+
+// validateInvestigateRef validates the on-demand investigate request: cluster,
+// namespace, kind, and name are all REQUIRED (non-blank) and each is
+// length-bounded, so empty/garbage refs are rejected with 400 before the engine
+// runs a live multi-source gather. Whitespace-only values count as empty. Returns
+// a descriptive error (used as the {"error":...} body) or nil when valid.
+func validateInvestigateRef(cluster, namespace, kind, name string) error {
+	for _, f := range []struct{ label, val string }{
+		{"cluster", cluster},
+		{"namespace", namespace},
+		{"kind", kind},
+		{"name", name},
+	} {
+		if strings.TrimSpace(f.val) == "" {
+			return fmt.Errorf("%s is required", f.label)
+		}
+		if len(f.val) > maxRefFieldLen {
+			return fmt.Errorf("%s exceeds %d characters", f.label, maxRefFieldLen)
+		}
+	}
+	return nil
+}
+
 // handleInvestigate runs an on-demand investigation for a resource and persists
 // the resulting incident.
 func (s *Server) handleInvestigate(w http.ResponseWriter, r *http.Request) {
@@ -209,11 +332,17 @@ func (s *Server) handleInvestigate(w http.ResponseWriter, r *http.Request) {
 	}
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	if !s.cfg.Auth.Enforcer(user).CanInvestigate(req.Cluster, req.Namespace) {
 		writeError(w, http.StatusForbidden, errForbidden)
+		return
+	}
+	// Reject empty/garbage refs with 400 before the engine's live gather. Placed
+	// after RBAC so an unauthorized caller can't use validation errors to probe.
+	if err := validateInvestigateRef(req.Cluster, req.Namespace, req.Kind, req.Name); err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	ref := model.ResourceRef{Cluster: req.Cluster, Namespace: req.Namespace, Kind: req.Kind, Name: req.Name}
@@ -235,15 +364,6 @@ func (s *Server) handleInvestigate(w http.ResponseWriter, r *http.Request) {
 // the requesting user is not an admin.
 const maskedEnvValue = "••••••"
 
-// maskPodSecrets applies a default-deny policy to literal env values for
-// non-admins: EVERY env var carrying a non-empty literal Value is masked,
-// regardless of name. A name-based denylist is unsafe — it misses
-// credential-bearing names like DATABASE_URL, REDIS_URL, SENTRY_DSN, or
-// CONNECTION_STRING — so we redact all literals and let admins see verbatim.
-//
-// valueFrom-sourced env already has an empty Value for non-admins (it was left
-// unresolved upstream), so it stays a reference chip and is not touched here.
-// Name and Source are preserved so the table is still useful when masked.
 // redactedIncident returns a copy of inc with raw log/event bodies scrubbed for
 // non-admins: each timeline signal's Message is run through the redactor and its
 // raw Payload (the unmodified backend object) is dropped. The shared store object
@@ -259,6 +379,15 @@ func redactedIncident(inc *model.Incident) *model.Incident {
 	return &cp
 }
 
+// maskPodSecrets applies a default-deny policy to literal env values for
+// non-admins: EVERY env var carrying a non-empty literal Value is masked,
+// regardless of name. A name-based denylist is unsafe — it misses
+// credential-bearing names like DATABASE_URL, REDIS_URL, SENTRY_DSN, or
+// CONNECTION_STRING — so we redact all literals and let admins see verbatim.
+//
+// valueFrom-sourced env already has an empty Value for non-admins (it was left
+// unresolved upstream), so it stays a reference chip and is not touched here.
+// Name and Source are preserved so the table is still useful when masked.
 func maskPodSecrets(pods []model.Pod) {
 	for pi := range pods {
 		for ci := range pods[pi].Containers {
@@ -281,7 +410,7 @@ func maskPodSecrets(pods []model.Pod) {
 func (s *Server) handleListPods(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	cluster := r.PathValue("cluster")
@@ -317,6 +446,15 @@ func (s *Server) handleListPods(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, pods)
 }
 
+// podLogsDefaultTail / podLogsMaxTail bound the number of log lines tailed. An
+// absent or invalid tail defaults; an oversized one is clamped so tail=99999999
+// can't be used to pull an unbounded log body (resource-abuse), mirroring how the
+// events endpoint caps limit/since.
+const (
+	podLogsDefaultTail int64 = 1000
+	podLogsMaxTail     int64 = 5000
+)
+
 // handleGetPodLogs returns a tail of one pod container's stdout/stderr logs.
 func (s *Server) handleGetPodLogs(w http.ResponseWriter, r *http.Request) {
 	// Log fetches read live through the source seam and can be large/slow, so
@@ -324,7 +462,7 @@ func (s *Server) handleGetPodLogs(w http.ResponseWriter, r *http.Request) {
 	clearWriteDeadline(w)
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	cluster := r.PathValue("cluster")
@@ -342,9 +480,16 @@ func (s *Server) handleGetPodLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var tail int64
+	tail := podLogsDefaultTail
 	if v := r.URL.Query().Get("tail"); v != "" {
-		tail, _ = strconv.ParseInt(v, 10, 64)
+		// Ignore a non-numeric or non-positive tail (fall back to the default) and
+		// clamp anything above the ceiling.
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			tail = n
+		}
+	}
+	if tail > podLogsMaxTail {
+		tail = podLogsMaxTail
 	}
 	res, err := provider.Resources().PodLogs(r.Context(), sources.PodLogsQuery{
 		Resource: model.ResourceRef{
@@ -375,7 +520,7 @@ func (s *Server) handleGetPodLogs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListConfigMaps(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	cluster := r.PathValue("cluster")
@@ -402,7 +547,7 @@ func (s *Server) handleListConfigMaps(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetConfigMap(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	cluster := r.PathValue("cluster")
@@ -444,7 +589,7 @@ func (s *Server) handleGetConfigMap(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListSecrets(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	cluster := r.PathValue("cluster")
@@ -485,7 +630,7 @@ func maskSecretValues(detail *model.SecretDetail) {
 func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	cluster := r.PathValue("cluster")
@@ -527,7 +672,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	enf := s.cfg.Auth.Enforcer(user)
@@ -583,7 +728,7 @@ func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListWorkloads(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	cluster := r.PathValue("cluster")
@@ -614,7 +759,7 @@ func (s *Server) handleListWorkloads(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleWorkloadHistory(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	cluster := r.PathValue("cluster")
@@ -655,7 +800,7 @@ func (s *Server) handleWorkloadHistory(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	cluster := r.PathValue("cluster")
@@ -698,7 +843,7 @@ const eventsMaxLimit = 1000
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return
 	}
 	cluster := r.PathValue("cluster")
@@ -756,7 +901,7 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (auth.User, bool) {
 	user, ok := s.cfg.Auth.CurrentUser(r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, nil)
+		writeError(w, http.StatusUnauthorized, errUnauthenticated)
 		return auth.User{}, false
 	}
 	if !s.cfg.Auth.Enforcer(user).IsAdmin() {
