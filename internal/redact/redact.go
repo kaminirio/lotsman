@@ -21,21 +21,37 @@ type rule struct {
 }
 
 // rules are applied in order; earlier rules win on overlapping spans. Private
-// keys first (largest spans), then tokens, then credential assignments, then
-// PII.
+// keys first (largest spans), then provider-specific tokens keyed off a
+// distinctive prefix (highest precision), then generic credential assignments,
+// then PII. All patterns are length-bounded and prefix-anchored so they stay
+// precise (no false positives on ordinary words, hashes, UUIDs, or image tags)
+// and — being RE2 — run in guaranteed linear time.
 var rules = []rule{
-	// PEM private key blocks (any key type).
+	// PEM private key blocks (any key type). Also covers the GCP service-account
+	// JSON "private_key" field, whose value embeds a full PEM block.
 	{regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`), "[REDACTED-PRIVATE-KEY]"},
 	// JWTs (header.payload.signature, base64url).
 	{regexp.MustCompile(`eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}`), "[REDACTED-JWT]"},
 	// Credentials embedded in a URL: scheme://user:password@host -> redact password.
 	{regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://[^:@/\s]+:)[^@/\s]+@`), "${1}[REDACTED]@"},
+	// GitHub fine-grained personal access tokens: github_pat_<22 chars>_<59 chars>.
+	{regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,255}\b`), "[REDACTED-GITHUB-TOKEN]"},
+	// GitHub tokens: classic PAT (ghp_), OAuth (gho_), user-to-server (ghu_),
+	// server-to-server (ghs_), refresh (ghr_). Body is ~36 base62 chars; the
+	// distinctive gh?_ prefix keeps this off ghcr.io image refs and the word
+	// "github".
+	{regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,255}\b`), "[REDACTED-GITHUB-TOKEN]"},
+	// Slack tokens: bot (xoxb-), app (xoxa-), workspace (xoxp-), refresh (xoxr-),
+	// legacy (xoxs-).
+	{regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,255}\b`), "[REDACTED-SLACK-TOKEN]"},
 	// AWS access key IDs.
 	{regexp.MustCompile(`AKIA[0-9A-Z]{16}`), "[REDACTED-AWS-KEY]"},
 	// Bearer tokens.
 	{regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-]{8,}`), "Bearer [REDACTED]"},
-	// key=value / "key":"value" credential assignments — keep the key, redact value.
-	{regexp.MustCompile(`(?i)((?:password|passwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|aws_secret_access_key|auth|dsn|connection[_-]?string)"?\s*[:=]\s*"?)([^"\s,;}]+)`), "${1}[REDACTED]"},
+	// key=value / "key":"value" credential assignments — keep the key, redact
+	// value. Covers non-bearer API tokens, GCP "private_key_id", and the AWS
+	// secret access key (which has no safe standalone shape) via its key name.
+	{regexp.MustCompile(`(?i)((?:password|passwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|aws_secret_access_key|access[_-]?token|refresh[_-]?token|private[_-]?token|private[_-]?key[_-]?id|auth|dsn|connection[_-]?string)"?\s*[:=]\s*"?)([^"\s,;}]+)`), "${1}[REDACTED]"},
 	// Email addresses (PII).
 	{regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`), "[REDACTED-EMAIL]"},
 }

@@ -376,6 +376,30 @@ func TestQueryLogs_MalformedBodyError(t *testing.T) {
 	}
 }
 
+func TestNew_NilClientHasTimeout(t *testing.T) {
+	// SRC-1: a nil client must fall back to a client WITH a non-zero timeout,
+	// not the timeout-less http.DefaultClient.
+	c := New("http://loki", nil)
+	if c.HTTP == nil {
+		t.Fatal("expected non-nil HTTP client for nil input")
+	}
+	if c.HTTP == http.DefaultClient {
+		t.Fatal("nil client fell back to http.DefaultClient (no timeout)")
+	}
+	if c.HTTP.Timeout <= 0 {
+		t.Fatalf("expected non-zero timeout, got %v", c.HTTP.Timeout)
+	}
+}
+
+func TestNew_ExplicitClientHonored(t *testing.T) {
+	// SRC-1: an explicitly-injected client must not be overridden.
+	custom := &http.Client{Timeout: 5 * time.Second}
+	c := New("http://loki", custom)
+	if c.HTTP != custom {
+		t.Fatal("explicit client was overridden")
+	}
+}
+
 func TestQueryLogs_EmptyResourceAndQuery(t *testing.T) {
 	// A completely empty resource with no query must return an error before
 	// even touching the network.

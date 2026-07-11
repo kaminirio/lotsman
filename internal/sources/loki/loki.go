@@ -24,6 +24,11 @@ const defaultLimit = 1000
 // runaway backend.
 const maxBody = 16 * 1024 * 1024
 
+// defaultTimeout is applied to the fallback HTTP client so a hung Loki backend
+// cannot stall an investigation indefinitely. Callers construct this adapter
+// with a nil client in production, so the timeout must live at the adapter level.
+const defaultTimeout = 30 * time.Second
+
 // Client queries Loki. Runs inside the agent (the agent is the single egress
 // point that can reach in-cluster Loki).
 type Client struct {
@@ -31,10 +36,12 @@ type Client struct {
 	HTTP    *http.Client
 }
 
-// New constructs a Loki client. A nil http.Client uses http.DefaultClient.
+// New constructs a Loki client. A nil http.Client falls back to a client with a
+// sane default timeout (defaultTimeout) rather than http.DefaultClient, which has
+// none — production callers pass nil.
 func New(baseURL string, hc *http.Client) *Client {
 	if hc == nil {
-		hc = http.DefaultClient
+		hc = &http.Client{Timeout: defaultTimeout}
 	}
 	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), HTTP: hc}
 }
@@ -84,7 +91,7 @@ func (c *Client) QueryLogs(ctx context.Context, q sources.LogQuery) ([]model.Sig
 		return nil, fmt.Errorf("loki: create request: %w", err)
 	}
 
-	resp, err := c.HTTP.Do(req)
+	resp, err := sources.DoWithRetry(c.HTTP, req)
 	if err != nil {
 		return nil, fmt.Errorf("loki: request failed: %w", err)
 	}

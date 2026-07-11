@@ -1,8 +1,8 @@
 // Package store is the control-plane persistence boundary. Lotsman persists only
 // its own derived state — incidents, change history, clusters, config, users —
-// and queries telemetry (logs/metrics) live through agents (ADR-0004). First
-// implementation: PostgreSQL via pgx (ADR-0005). The scaffold ships an in-memory
-// implementation.
+// and queries telemetry (logs/metrics) live through agents (ADR-0004). The
+// production implementation is PostgreSQL via pgx (ADR-0005), auto-selected when
+// a DSN is configured; an in-memory implementation backs development and tests.
 package store
 
 import (
@@ -25,11 +25,27 @@ type Store interface {
 	ListClusters(ctx context.Context) ([]Cluster, error)
 }
 
+// DefaultIncidentListLimit is the safety cap applied by ListIncidents when the
+// caller leaves IncidentFilter.Limit unset (<= 0). It bounds an otherwise
+// unbounded SELECT so a large incident table cannot be pulled into memory in one
+// query. The API layer typically sets an explicit smaller limit; this is the
+// backstop that keeps the store safe by default.
+const DefaultIncidentListLimit = 500
+
 // IncidentFilter narrows ListIncidents.
 type IncidentFilter struct {
 	Cluster string
 	Status  model.IncidentStatus
 	Limit   int
+}
+
+// effectiveLimit resolves IncidentFilter.Limit to the value actually applied by
+// a store: the caller's positive limit, or DefaultIncidentListLimit when unset.
+func (f IncidentFilter) effectiveLimit() int {
+	if f.Limit > 0 {
+		return f.Limit
+	}
+	return DefaultIncidentListLimit
 }
 
 // Cluster is a registered cluster plus its agent connection state. Field shape

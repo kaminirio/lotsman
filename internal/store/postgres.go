@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"lotsman/internal/model"
@@ -25,7 +28,7 @@ type Postgres struct {
 }
 
 // NewPostgres opens a connection pool to dsn, verifies connectivity, and applies
-// the (idempotent) schema migrations. Caller must Close the returned store.
+// any pending schema migrations. Caller must Close the returned store.
 func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -43,21 +46,166 @@ func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	return p, nil
 }
 
-// migrate applies every embedded migration. Statements use CREATE ... IF NOT
-// EXISTS, so applying them on every startup is safe and needs no version table.
-func (p *Postgres) migrate(ctx context.Context) error {
+// migration is one embedded SQL migration, identified by its file name (which
+// sorts lexically into apply order).
+type migration struct {
+	version string
+	sql     string
+}
+
+// loadMigrations reads and lexically orders the embedded migration files. Pure
+// (no DB), so it is unit-testable without a live database.
+func loadMigrations() ([]migration, error) {
 	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {
-		return fmt.Errorf("store: read migrations: %w", err)
+		return nil, fmt.Errorf("store: read migrations: %w", err)
 	}
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		sql, err := migrationsFS.ReadFile("migrations/" + e.Name())
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	out := make([]migration, 0, len(names))
+	for _, name := range names {
+		b, err := migrationsFS.ReadFile("migrations/" + name)
 		if err != nil {
-			return fmt.Errorf("store: read migration %s: %w", e.Name(), err)
+			return nil, fmt.Errorf("store: read migration %s: %w", name, err)
 		}
-		if _, err := p.pool.Exec(ctx, string(sql)); err != nil {
-			return fmt.Errorf("store: apply migration %s: %w", e.Name(), err)
+		out = append(out, migration{version: name, sql: string(b)})
+	}
+	return out, nil
+}
+
+// pendingMigrations returns, in order, the migrations whose version is not yet
+// recorded in applied. Pure helper (no DB) so version selection is unit-testable.
+func pendingMigrations(all []migration, applied map[string]bool) []migration {
+	out := make([]migration, 0, len(all))
+	for _, m := range all {
+		if !applied[m.version] {
+			out = append(out, m)
 		}
+	}
+	return out
+}
+
+// migrateAdvisoryLockKey is the fixed application-wide key for the session-scoped
+// pg_advisory_lock that serializes migration across processes. Its exact value is
+// arbitrary but must stay constant so every replica contends on the same lock;
+// it is ASCII "LOTS" so a `pg_locks` inspection is self-identifying.
+const migrateAdvisoryLockKey int64 = 0x4C4F5453 // ASCII "LOTS"
+
+// SQL used by migrate(). Kept as named constants so the advisory-lock and
+// idempotent-insert guarantees are assertable without a live database.
+const (
+	advisoryLockSQL   = `SELECT pg_advisory_lock($1)`
+	advisoryUnlockSQL = `SELECT pg_advisory_unlock($1)`
+	// ON CONFLICT DO NOTHING is belt-and-suspenders under the advisory lock: even
+	// if two migrators ever raced the bookkeeping insert, the second is a no-op
+	// instead of a PK violation that would fail the tx and crash-loop the replica.
+	insertMigrationSQL = `INSERT INTO schema_migrations (version, applied_at) VALUES ($1, now()) ON CONFLICT (version) DO NOTHING`
+)
+
+// migrate applies embedded SQL migrations in lexical (version) order, recording
+// each in schema_migrations and skipping any already applied. Each pending
+// migration runs in its own transaction together with its bookkeeping insert, so
+// a migration and its record commit atomically (a crash mid-run never leaves a
+// half-applied version marked done). 0001_init uses CREATE ... IF NOT EXISTS so
+// it records cleanly even against a pre-existing scaffold schema; later
+// migrations need not be idempotent.
+//
+// The whole run is serialized across processes by a session-scoped
+// pg_advisory_lock held on a single dedicated connection: when several
+// control-plane replicas boot against one database only one migrates at a time,
+// so the others don't race the pending computation and PK-collide on the
+// bookkeeping insert (which crash-looped the losing replica). The advisory lock
+// is per-CONNECTION, so it must be acquired, held, and released on the same
+// pooled connection that runs the migrations.
+func (p *Postgres) migrate(ctx context.Context) error {
+	conn, err := p.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("store: acquire migration connection: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, advisoryLockSQL, migrateAdvisoryLockKey); err != nil {
+		return fmt.Errorf("store: acquire migration advisory lock: %w", err)
+	}
+	// Release on the same connection before it returns to the pool. Best-effort:
+	// the session lock is also dropped automatically when the connection closes.
+	defer func() { _, _ = conn.Exec(ctx, advisoryUnlockSQL, migrateAdvisoryLockKey) }()
+
+	if _, err := conn.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version    TEXT        PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`); err != nil {
+		return fmt.Errorf("store: ensure schema_migrations: %w", err)
+	}
+
+	applied, err := appliedMigrations(ctx, conn)
+	if err != nil {
+		return err
+	}
+	all, err := loadMigrations()
+	if err != nil {
+		return err
+	}
+	for _, m := range pendingMigrations(all, applied) {
+		if err := applyMigration(ctx, conn, m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrator is the subset of pgx query methods migrate() needs, satisfied by a
+// pooled connection (so the advisory lock and the migrations share one session).
+type migrator interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// appliedMigrations reads the set of already-recorded migration versions.
+func appliedMigrations(ctx context.Context, q migrator) (map[string]bool, error) {
+	rows, err := q.Query(ctx, `SELECT version FROM schema_migrations`)
+	if err != nil {
+		return nil, fmt.Errorf("store: read schema_migrations: %w", err)
+	}
+	defer rows.Close()
+	applied := make(map[string]bool)
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, fmt.Errorf("store: scan schema_migrations: %w", err)
+		}
+		applied[v] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read schema_migrations: %w", err)
+	}
+	return applied, nil
+}
+
+// applyMigration runs one migration and records its version in a single
+// transaction on the given connection.
+func applyMigration(ctx context.Context, q migrator, m migration) error {
+	tx, err := q.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin migration %s: %w", m.version, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once the tx commits
+	if _, err := tx.Exec(ctx, m.sql); err != nil {
+		return fmt.Errorf("store: apply migration %s: %w", m.version, err)
+	}
+	if _, err := tx.Exec(ctx, insertMigrationSQL, m.version); err != nil {
+		return fmt.Errorf("store: record migration %s: %w", m.version, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit migration %s: %w", m.version, err)
 	}
 	return nil
 }
@@ -126,7 +274,8 @@ WHERE id = $1`
 
 func (p *Postgres) ListIncidents(ctx context.Context, f IncidentFilter) ([]*model.Incident, error) {
 	// Build the query dynamically: optional cluster/status filters, most-recent
-	// first, optional limit — mirroring Memory.ListIncidents semantics.
+	// first, always-bounded limit (defaulting to DefaultIncidentListLimit) —
+	// mirroring Memory.ListIncidents semantics.
 	q := `
 SELECT id, title, status, severity, opened_at, updated_at, resource, timeline, hypotheses
 FROM incidents`
@@ -151,10 +300,10 @@ FROM incidents`
 		q += c
 	}
 	q += " ORDER BY opened_at DESC"
-	if f.Limit > 0 {
-		args = append(args, f.Limit)
-		q += fmt.Sprintf(" LIMIT $%d", len(args))
-	}
+	// Always bound the result set: an unset Limit falls back to
+	// DefaultIncidentListLimit rather than an unbounded SELECT (STORE-3).
+	args = append(args, f.effectiveLimit())
+	q += fmt.Sprintf(" LIMIT $%d", len(args))
 
 	rows, err := p.pool.Query(ctx, q, args...)
 	if err != nil {
@@ -210,14 +359,19 @@ func scanIncident(r row) (*model.Incident, error) {
 }
 
 func (p *Postgres) SaveCluster(ctx context.Context, c Cluster) error {
+	// Upsert connection state. Descriptive fields (env/region/agent_version) are
+	// only overwritten when the incoming value is non-empty, so a live agent
+	// connect — which carries just name+connected — cannot wipe env/region/version
+	// previously recorded by seed or an earlier connect. connected always reflects
+	// the latest call.
 	const q = `
 INSERT INTO clusters (name, env, region, connected, agent_version)
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (name) DO UPDATE SET
-    env           = EXCLUDED.env,
-    region        = EXCLUDED.region,
+    env           = COALESCE(NULLIF(EXCLUDED.env, ''), clusters.env),
+    region        = COALESCE(NULLIF(EXCLUDED.region, ''), clusters.region),
     connected     = EXCLUDED.connected,
-    agent_version = EXCLUDED.agent_version`
+    agent_version = COALESCE(NULLIF(EXCLUDED.agent_version, ''), clusters.agent_version)`
 	if _, err := p.pool.Exec(ctx, q, c.Name, c.Env, c.Region, c.Connected, c.AgentVersion); err != nil {
 		return fmt.Errorf("store: save cluster %s: %w", c.Name, err)
 	}

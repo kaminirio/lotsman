@@ -1,6 +1,7 @@
 -- 0001_init: control-plane state schema (ADR-0004/ADR-0005).
--- Idempotent: applied on every NewPostgres via CREATE TABLE IF NOT EXISTS, so no
--- migration library or schema_migrations bookkeeping is needed for the scaffold.
+-- Applied and recorded once by the versioned migrator (see postgres.go migrate);
+-- kept idempotent (CREATE ... IF NOT EXISTS) so it records cleanly against a
+-- pre-existing scaffold schema. Later migrations need not be idempotent.
 -- Persist DERIVED state only — logs/metrics are queried live through agents.
 
 -- Incidents: scalar columns for the fields ListIncidents filters/sorts on, plus

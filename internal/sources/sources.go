@@ -22,8 +22,10 @@ import (
 	"lotsman/internal/model"
 )
 
-// ErrNotImplemented is returned by scaffold stubs. Concrete adapters replace it
-// with real backend calls.
+// ErrNotImplemented is a sentinel for a source capability that is unavailable.
+// No production adapter returns it any more (every source has a real backend
+// implementation); it is retained as a stable sentinel that test fakes return to
+// simulate a per-source failure and exercise the correlator's tolerance path.
 var ErrNotImplemented = errors.New("lotsman: source not implemented")
 
 // TimeRange is a half-open [Start, End) query window.

@@ -58,11 +58,17 @@ func (d *Dialer) WithEventFeed(feed func(context.Context) <-chan Event) *Dialer 
 	return d
 }
 
+// HasEventFeed reports whether a watch-event feed has been registered. It exists
+// so callers/tests can assert the push path is wired without reaching into the
+// unexported feed field.
+func (d *Dialer) HasEventFeed() bool { return d.pushFeed != nil }
+
 // Run connects to the control plane and serves until ctx is cancelled,
 // reconnecting with capped backoff on transient stream failures.
 func (d *Dialer) Run(ctx context.Context, handler Handler) error {
-	// mTLS seam (ADR-0002): swap insecure for credentials.NewTLS(clientTLSConfig)
-	// once agent certs are issued; for local dev the link is plaintext.
+	// TODO(SEC-1): replace with mTLS credentials (per-cluster client certs).
+	// Swap insecure for credentials.NewTLS(clientTLSConfig) once agent certs are
+	// issued (ADR-0002); for local dev the link is plaintext.
 	opts := append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, d.dialOpts...)
 	conn, err := grpc.NewClient(d.addr, opts...)
 	if err != nil {
