@@ -11,13 +11,29 @@ export interface AuthUser {
   groups?: string[]
 }
 
+// SSO providers offered alongside first-party login (ADR-0011).
+export type SsoProvider = 'github' | 'google' | 'azure'
+
+// Shape of GET /auth/providers. `local` (username/password) is always true; each
+// SSO provider is true only when its credentials are configured.
 export interface Providers {
-  enabled: boolean
-  github?: boolean
+  local: boolean
+  github: boolean
+  google: boolean
+  azure: boolean
 }
 
 export async function getProviders(): Promise<Providers> {
   return apiFetch<Providers>('/auth/providers')
+}
+
+// login authenticates a first-party account and, on success, sets the session
+// cookie (POST /auth/login). Rejects with an ApiError (401) on bad credentials.
+export async function login(username: string, password: string): Promise<void> {
+  await apiFetch('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  })
 }
 
 export async function getMe(): Promise<AuthUser | null> {

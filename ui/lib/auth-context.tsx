@@ -4,7 +4,7 @@
 
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
-import { getMe, getProviders, logout as doLogout, type AuthUser } from './auth'
+import { getMe, logout as doLogout, type AuthUser } from './auth'
 
 interface AuthContextValue {
   user: AuthUser | null
@@ -32,16 +32,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     async function check() {
       try {
-        const providers = await getProviders()
-        const enabled = providers.enabled !== false && !!providers.github
-        setAuthEnabled(enabled)
-
-        if (!enabled) {
-          setUser({ login: 'anonymous', email: '', name: 'Anonymous', provider: 'none' })
-          if (pathname === '/login') router.replace('/')
-          return
-        }
-
+        // First-party auth is always enforced (ADR-0011): resolve the current
+        // session directly. A backend running with auth disabled (local dev)
+        // answers /auth/me with the anonymous principal, so getMe still returns a
+        // user there and no redirect happens.
+        setAuthEnabled(true)
         const me = await getMe()
         setUser(me)
         if (!me && pathname !== '/login') router.replace('/login')

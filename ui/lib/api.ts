@@ -433,3 +433,99 @@ export const getRbacConfig = () => apiFetch<RbacConfig>('/api/v1/admin/rbac/conf
 // GET /api/v1/admin/rbac/effective?user=<login>  -> RbacEffective   (admin only)
 export const getRbacEffective = (user: string) =>
   apiFetch<RbacEffective>(`/api/v1/admin/rbac/effective?${new URLSearchParams({ user })}`)
+
+// ---- First-party users (ADR-0011, admin only) ----
+// Mirror the Go userView (internal/api/users.go): never carries password_hash or
+// sso_subject. sso_provider is "" for local-only accounts.
+
+export interface LotsmanUser {
+  id: string
+  username: string
+  email: string
+  is_admin: boolean
+  active: boolean
+  sso_provider: string
+  created_at: string
+}
+
+export interface CreateUserInput {
+  username: string
+  email: string
+  password: string
+  is_admin: boolean
+}
+
+// Partial update: only the provided fields are changed. `password` resets the
+// account's password; omit it to leave the credential untouched.
+export interface UpdateUserInput {
+  is_admin?: boolean
+  active?: boolean
+  password?: string
+}
+
+// GET /api/v1/users -> { users: [...] }  (admin only)
+export const listUsers = () =>
+  apiFetch<{ users: LotsmanUser[] }>('/api/v1/users').then((r) => r.users)
+
+// POST /api/v1/users -> LotsmanUser  (409 on a duplicate username/email)
+export const createUser = (input: CreateUserInput) =>
+  apiFetch<LotsmanUser>('/api/v1/users', { method: 'POST', body: JSON.stringify(input) })
+
+// PATCH /api/v1/users/{id} -> LotsmanUser  (409 if it would remove the last admin)
+export const updateUser = (id: string, patch: UpdateUserInput) =>
+  apiFetch<LotsmanUser>(`/api/v1/users/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  })
+
+// DELETE /api/v1/users/{id} -> 204  (409 if it would remove the last admin)
+export const deleteUser = (id: string) =>
+  apiFetch<void>(`/api/v1/users/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+// ---- Per-cluster agent enrollment tokens (ADR-0010, admin only) ----
+// Only the plaintext token returned by createEnrollmentToken ever exposes secret
+// material, and only once; list/defaults never do.
+
+// Presentation hints for assembling the `helm install lotsman-agent` command.
+// `durable` is false on an in-memory store, in which case minting is disabled.
+export interface EnrollmentDefaults {
+  gateway_addr: string
+  chart: string
+  chart_version: string
+  namespace: string
+  durable: boolean
+}
+
+// Token metadata (no plaintext, no hash). expires_at is null/absent = never.
+export interface EnrollmentToken {
+  id: string
+  cluster: string
+  created_at: string
+  expires_at?: string | null
+  revoked: boolean
+}
+
+// The create response additionally carries the one-time plaintext token.
+export interface EnrollmentTokenCreated extends EnrollmentToken {
+  token: string
+}
+
+// GET /api/v1/enrollment-defaults -> EnrollmentDefaults  (admin only)
+export const getEnrollmentDefaults = () => apiFetch<EnrollmentDefaults>('/api/v1/enrollment-defaults')
+
+// GET /api/v1/enrollment-tokens -> { tokens: [...] }  (admin only; empty on a
+// non-durable store rather than erroring, so the Clusters page still loads).
+export const listEnrollmentTokens = () =>
+  apiFetch<{ tokens: EnrollmentToken[] }>('/api/v1/enrollment-tokens').then((r) => r.tokens)
+
+// POST /api/v1/enrollment-tokens -> EnrollmentTokenCreated  (503 on a non-durable
+// store). ttlHours of 0 mints a non-expiring token.
+export const createEnrollmentToken = (cluster: string, ttlHours: number) =>
+  apiFetch<EnrollmentTokenCreated>('/api/v1/enrollment-tokens', {
+    method: 'POST',
+    body: JSON.stringify({ cluster, ttl_hours: ttlHours }),
+  })
+
+// POST /api/v1/enrollment-tokens/{id}/revoke -> 204  (404 for an unknown id)
+export const revokeEnrollmentToken = (id: string) =>
+  apiFetch<void>(`/api/v1/enrollment-tokens/${encodeURIComponent(id)}/revoke`, { method: 'POST' })
