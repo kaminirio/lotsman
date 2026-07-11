@@ -90,10 +90,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled": s.cfg.Auth.Enabled(),
-		"github":  s.cfg.Auth.Enabled(),
-	})
+	// Report which SSO providers are configured (github/google/azure). Local
+	// username/password login is always available (ADR-0011), so "local" is always
+	// true — the UI renders a password form plus a button per enabled SSO provider.
+	resp := s.cfg.Auth.ProviderStatus()
+	resp["local"] = true
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // incidentsDefaultLimit / incidentsMaxLimit bound the page size returned by the

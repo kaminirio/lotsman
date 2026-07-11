@@ -46,6 +46,13 @@ type Config struct {
 	// endpoint then responds 503 and nothing else changes. It is assistive only and
 	// never on the detection hot path.
 	Explainer analyze.Explainer
+
+	// Enrollment-command presentation hints (ADR-0010), surfaced read-only by
+	// GET /api/v1/enrollment-defaults so the UI can assemble the copy-paste
+	// `helm install lotsman-agent` command. Never carry token material.
+	PublicGatewayAddr string // externally reachable agent-gateway address
+	AgentChart        string // public Helm chart reference, e.g. oci://ghcr.io/kaminirio/charts/lotsman-agent
+	AgentChartVersion string // chart version pin
 }
 
 // Server serves the REST API + embedded UI.

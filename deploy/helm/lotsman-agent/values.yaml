@@ -1,0 +1,95 @@
+# Default values for lotsman-agent.
+# Install ONE release per monitored cluster. Each agent dials OUT to the control
+# plane, so the cluster running the agent needs egress to controlPlane.addr but
+# does NOT need to be reachable from the control plane.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/kaminirio/lotsman-agent
+  pullPolicy: IfNotPresent
+  # -- Image tag. Defaults to the chart's appVersion when empty.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create the agent ServiceAccount (the RBAC below binds to it).
+  create: true
+  name: ""
+  annotations: {}
+
+config:
+  # -- REQUIRED. Control-plane agent-gateway address (host:port). For a control
+  # plane in the same cluster use its in-cluster Service DNS; for one elsewhere
+  # use its externally-exposed gateway address.
+  controlPlaneAddr: "lotsman-control-plane.lotsman.svc:9090"
+  # -- REQUIRED. Unique logical name for THIS cluster. Shows in the cluster
+  # selector and keys every signal — must differ across agent installs.
+  cluster: "default"
+  # Backend adapter endpoints. Empty values fall back to the binary's built-in
+  # in-cluster defaults (see internal/config). An unreachable backend degrades
+  # gracefully — that adapter just returns no data.
+  loki:
+    url: "http://loki-gateway.monitoring.svc:80"
+  victoria:
+    url: "http://vmselect.monitoring.svc:8481"
+  argocd:
+    url: "http://argocd-server.argocd.svc:80"
+    # -- ArgoCD API token (LOTSMAN_ARGOCD_TOKEN). Stored in a Secret. Leave empty
+    # if ArgoCD allows anonymous read.
+    token: ""
+  # -- In-cluster config is used when empty. Set a path only for out-of-cluster
+  # access via a mounted kubeconfig (you must also mount it via extraVolumes).
+  kubeconfigPath: ""
+
+# Per-cluster enrollment token this agent presents to the control plane
+# (LOTSMAN_AGENT_TOKEN). Mint it on the control plane for THIS cluster name
+# (config.cluster) via POST /api/v1/enrollment-tokens or
+# `lotsman cluster-token generate <cluster>`, then paste the value here. The
+# token is bound to config.cluster — it will be rejected for any other name.
+agentToken:
+  value: "change-me"
+  existingSecret: ""
+  existingSecretKey: "agent-token"
+
+rbac:
+  # -- Create the cluster-read ClusterRole + binding the agent needs.
+  create: true
+  # -- ⚠ OPT-IN, DANGEROUS. Also grant cluster-wide get/list on Secrets, powering
+  # the admin "reveal resolved env" + Secrets browser. Anyone who compromises the
+  # agent can then read EVERY Secret in the cluster. Only enable in a TRUSTED,
+  # SINGLE-TENANT cluster, and it does nothing unless allowEnvReveal is also true.
+  envReveal: false
+
+# -- Mirror of rbac.envReveal: arms the agent to actually resolve Secret values
+# (LOTSMAN_ALLOW_ENV_REVEAL). Without this the RBAC grant alone resolves nothing.
+allowEnvReveal: false
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

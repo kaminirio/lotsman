@@ -52,6 +52,40 @@ type Server struct {
 	// Ignored when a Postgres DSN is configured.
 	Seed    bool
 	Version string
+
+	// Auth configures first-party username/password accounts + optional SSO
+	// (ADR-0011).
+	Auth AuthConfig
+
+	// PublicGatewayAddr is the externally reachable agent-gateway address the UI
+	// shows operators in the enroll command (may differ from the in-cluster
+	// GatewayAddr). AgentChart/AgentChartVersion pin the Helm chart the enroll
+	// command references (ADR-0010). Presentation-only; never token material.
+	PublicGatewayAddr string
+	AgentChart        string
+	AgentChartVersion string
+}
+
+// AuthConfig configures authentication (ADR-0011). Local username/password auth
+// is always on; each SSO provider is offered only when its client id/secret (and
+// Azure tenant) are set. AdminUser/AdminPassword idempotently seed the first
+// admin on boot.
+type AuthConfig struct {
+	SessionSecret  string
+	BaseURL        string   // control-plane origin for OAuth redirect URIs
+	UIURL          string   // UI origin to return to after SSO login
+	AllowedDomains []string // verified-email domains eligible for SSO auto-provision
+
+	GitHubClientID     string
+	GitHubClientSecret string
+	GoogleClientID     string
+	GoogleClientSecret string
+	AzureClientID      string
+	AzureClientSecret  string
+	AzureTenant        string
+
+	AdminUser     string
+	AdminPassword string
 }
 
 // Agent is the in-cluster agent configuration. The agent dials OUT to the
@@ -94,7 +128,41 @@ func LoadServer(version string) Server {
 		LLMModel:       env("LOTSMAN_LLM_MODEL", "gemma3:4b"),
 		Seed:           envBool("LOTSMAN_SEED", true),
 		Version:        version,
+		Auth: AuthConfig{
+			SessionSecret:      os.Getenv("LOTSMAN_SESSION_SECRET"),
+			BaseURL:            env("LOTSMAN_BASE_URL", "http://localhost:8080"),
+			UIURL:              env("LOTSMAN_UI_URL", "http://localhost:3000"),
+			AllowedDomains:     splitCSV(os.Getenv("LOTSMAN_ALLOWED_EMAIL_DOMAINS")),
+			GitHubClientID:     os.Getenv("LOTSMAN_GITHUB_CLIENT_ID"),
+			GitHubClientSecret: os.Getenv("LOTSMAN_GITHUB_CLIENT_SECRET"),
+			GoogleClientID:     os.Getenv("LOTSMAN_GOOGLE_CLIENT_ID"),
+			GoogleClientSecret: os.Getenv("LOTSMAN_GOOGLE_CLIENT_SECRET"),
+			AzureClientID:      os.Getenv("LOTSMAN_AZURE_CLIENT_ID"),
+			AzureClientSecret:  os.Getenv("LOTSMAN_AZURE_CLIENT_SECRET"),
+			AzureTenant:        os.Getenv("LOTSMAN_AZURE_TENANT"),
+			AdminUser:          os.Getenv("LOTSMAN_ADMIN_USER"),
+			AdminPassword:      os.Getenv("LOTSMAN_ADMIN_PASSWORD"),
+		},
+		PublicGatewayAddr: env("LOTSMAN_PUBLIC_GATEWAY_ADDR", env("LOTSMAN_GATEWAY_ADDR", ":9090")),
+		AgentChart:        env("LOTSMAN_AGENT_CHART", "oci://ghcr.io/kaminirio/charts/lotsman-agent"),
+		AgentChartVersion: os.Getenv("LOTSMAN_AGENT_CHART_VERSION"),
 	}
+}
+
+// splitCSV splits a comma-separated env value into a trimmed, non-empty slice.
+// An empty input yields nil so an unset allowlist stays deny-by-default.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // LoadAgent reads the agent config from the environment.

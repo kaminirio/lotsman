@@ -1,0 +1,82 @@
+{{- if .Values.rbac.create }}
+# Base cluster-read role. Grants read-only access to the workload/pod/event/node/
+# configmap surface the adapters need. Secret VALUES are intentionally NOT here —
+# see the opt-in env-reveal grant below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "lotsman-agent.fullname" . }}
+  labels:
+    {{- include "lotsman-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["events", "pods"]
+    verbs: ["get", "list", "watch"]
+  # Node objects carry status/roles/version/capacity only — no secret data.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Pod log streaming for pod inspection.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  # ReplicaSet get/list resolves Pod -> ReplicaSet -> Deployment ownership and
+  # reconstructs image/tag history from revision ReplicaSets.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  # ConfigMap values are not secret -> the ConfigMap browser lives in the base role.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "lotsman-agent.fullname" . }}
+  labels:
+    {{- include "lotsman-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "lotsman-agent.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lotsman-agent.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.rbac.envReveal }}
+---
+# ⚠️  OPT-IN ENV-REVEAL GRANT — cluster-wide get/list on Secrets. With this,
+# anyone who compromises the agent can read EVERY Secret in the cluster. Enabled
+# because rbac.envReveal=true; only meaningful with allowEnvReveal=true on the
+# agent. Apply ONLY in trusted, single-tenant clusters.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "lotsman-agent.fullname" . }}-env-reveal
+  labels:
+    {{- include "lotsman-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "lotsman-agent.fullname" . }}-env-reveal
+  labels:
+    {{- include "lotsman-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "lotsman-agent.fullname" . }}-env-reveal
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lotsman-agent.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

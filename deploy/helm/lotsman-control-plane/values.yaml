@@ -1,0 +1,140 @@
+# Default values for lotsman-control-plane.
+# This is a YAML-formatted file. Override with `-f my-values.yaml` or `--set`.
+
+# -- Number of control-plane replicas. The in-memory store is per-pod and the
+# agent gateway is stateful per connection, so keep this at 1 until the Postgres
+# store (LOTSMAN_DATABASE_URL) lands and is wired here.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/kaminirio/lotsman-server
+  pullPolicy: IfNotPresent
+  # -- Image tag. Defaults to the chart's appVersion when empty.
+  tag: ""
+
+# -- Image pull secrets for private registries.
+imagePullSecrets: []
+# -- Override the chart name used in resource names.
+nameOverride: ""
+# -- Override the fully-qualified release name.
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a dedicated ServiceAccount for the control plane.
+  create: true
+  # -- Name to use; generated from the fullname template when empty.
+  name: ""
+  annotations: {}
+
+# Lotsman configuration. These map 1:1 to LOTSMAN_* env vars (internal/config).
+config:
+  # -- HTTP API + embedded UI listen address.
+  addr: ":8080"
+  # -- Agent gateway listen address (agents dial this; not needed in directMode).
+  gatewayAddr: ":9090"
+  # -- Run without an agent: the control plane reads the local cluster directly.
+  # Use this for a single reachable cluster ("solve my own stack first"). When
+  # true, set agentSources below so the in-process adapters know where Loki/VM/
+  # ArgoCD live, and grant cluster-read RBAC via rbac.create.
+  directMode: false
+  # -- Logical cluster name reported in directMode (ignored in agent mode).
+  cluster: "default"
+  # -- Seed in-memory demo data (sample clusters + incident). Turn OFF in real
+  # deployments so only connected clusters show.
+  seed: false
+  # -- Engine scan interval (Go duration).
+  scanInterval: "30s"
+  # Optional LLM incident-explainer. Empty url disables the /explain endpoint.
+  llm:
+    url: ""
+    model: "gemma3:4b"
+  # -- Postgres DSN for durable state. Empty -> in-memory store (single pod only).
+  # REQUIRED for agent mode: enrollment tokens need a durable store, so with this
+  # empty the control plane refuses to mint tokens (503) and rejects all agents.
+  databaseUrl: ""
+  # Enrollment-command hints surfaced in the UI's "Clusters → enroll" flow. These
+  # only populate the copy-paste `helm install lotsman-agent` command; they never
+  # affect auth.
+  enrollment:
+    # -- Externally reachable agent-gateway address agents dial (host:port). Empty
+    # leaves the field for the operator to fill in. Set this to your LoadBalancer/
+    # NodePort/Ingress address for the gateway port so the generated command is
+    # accurate out of the box.
+    publicGatewayAddr: ""
+    # -- Public Helm chart reference for the agent used in the generated command.
+    agentChart: "oci://ghcr.io/kaminirio/charts/lotsman-agent"
+    # -- Chart version pin. Empty -> latest (no --version flag).
+    agentChartVersion: ""
+  # -- SSO / OAuth config blob (LOTSMAN_SSO_CONFIG). Empty -> auth disabled.
+  ssoConfig: ""
+
+# There is no shared agent token. The gateway authenticates each agent against a
+# PER-CLUSTER enrollment token minted at runtime via the admin API
+# (POST /api/v1/enrollment-tokens) or `lotsman cluster-token generate <cluster>`.
+# Mint one token per cluster and set it as agentToken.value on that cluster's
+# lotsman-agent release. See deploy/helm/README.md.
+
+# directMode RBAC — only used when config.directMode is true. Grants the control
+# plane's ServiceAccount cluster-read access (mirrors the agent's base role).
+rbac:
+  # -- Create the ClusterRole + binding for in-process cluster reads (directMode).
+  create: true
+
+service:
+  type: ClusterIP
+  apiPort: 8080
+  gatewayPort: 9090
+  annotations: {}
+
+# Ingress for the API + UI (port 8080). The agent gateway (9090) is gRPC/h2c and
+# is intentionally NOT exposed here — expose it via a LoadBalancer/NodePort or a
+# separate gRPC-aware Ingress when agents live outside the cluster.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: lotsman.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# Probes hit /healthz on the API port.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: api
+  initialDelaySeconds: 5
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: api
+  initialDelaySeconds: 2
+  periodSeconds: 5
+
+# -- Extra environment variables (list of {name,value} or {name,valueFrom}).
+extraEnv: []
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

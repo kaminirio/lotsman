@@ -1,0 +1,47 @@
+Lotsman control plane "{{ .Release.Name }}" is deploying to namespace {{ .Release.Namespace }}.
+
+1. Wait for the pod to become ready:
+
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "lotsman-control-plane.fullname" . }}
+
+2. Reach the API + UI (port {{ .Values.service.apiPort }}):
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+   http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/
+{{- end }}
+{{- else }}
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "lotsman-control-plane.fullname" . }} 8080:{{ .Values.service.apiPort }}
+   open http://localhost:8080
+{{- end }}
+
+   curl http://localhost:8080/api/v1/incidents | jq
+
+{{- if .Values.config.directMode }}
+
+3. Mode: DIRECT — this control plane reads its own cluster in-process. No agent
+   is needed. RBAC for cluster reads was {{ if .Values.rbac.create }}created{{ else }}NOT created (rbac.create=false){{ end }}.
+{{- else }}
+
+3. Mode: AGENT — onboard each monitored cluster in two steps:
+{{- if not .Values.config.databaseUrl }}
+
+   ⚠  Agent enrollment requires a DURABLE store. config.databaseUrl is empty, so
+      this control plane runs in-memory: minting returns 503 and agents are
+      rejected. Set config.databaseUrl (LOTSMAN_DATABASE_URL) before onboarding.
+{{- end }}
+
+   a) Mint a per-cluster enrollment token from this control plane (admin-gated):
+
+        POST /api/v1/enrollment-tokens   {"cluster":"<name>"}
+        # or, via the CLI:
+        lotsman cluster-token generate <name> --api http://<control-plane>:8080
+
+   b) Install lotsman-agent in that cluster with the minted token, pointing at:
+
+        controlPlane.addr: {{ include "lotsman-control-plane.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.gatewayPort }}
+        agentToken.value:  <the token from step a>
+
+   The token is bound to that exact cluster name. For agents OUTSIDE this cluster,
+   expose the gateway port ({{ .Values.service.gatewayPort }}) via a LoadBalancer/NodePort — the ClusterIP
+   Service is reachable in-cluster only.
+{{- end }}

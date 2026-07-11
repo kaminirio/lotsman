@@ -39,9 +39,13 @@ func (s *Server) routes() http.Handler {
 	// Auth (shape matches the UI auth context).
 	mux.HandleFunc("GET /auth/me", s.handleMe)
 	mux.HandleFunc("GET /auth/providers", s.handleProviders)
-	// GitHub OAuth flow — handlers hang off the auth.Manager. These are no-ops
-	// (404) when SSO is disabled, so local dev is unaffected. Rate-limited per IP:
-	// each triggers outbound GitHub calls (brute-force / abuse surface).
+	// First-party local login (ADR-0011): username/password → session cookie.
+	// Reachable without a session but CSRF-guarded (see auth.Middleware).
+	// Rate-limited per IP: it is a password-guessing surface.
+	mux.Handle("POST /auth/login", authLimiter.middleware(http.HandlerFunc(s.cfg.Auth.HandleLocalLogin)))
+	// OAuth SSO flow — handlers hang off the auth.Manager. A provider that is not
+	// configured 404s. Rate-limited per IP: each triggers outbound provider calls
+	// (brute-force / abuse surface).
 	mux.Handle("GET /auth/login/{provider}", authLimiter.middleware(http.HandlerFunc(s.cfg.Auth.HandleLogin)))
 	mux.Handle("GET /auth/callback/{provider}", authLimiter.middleware(http.HandlerFunc(s.cfg.Auth.HandleCallback)))
 	mux.HandleFunc("POST /auth/logout", s.cfg.Auth.HandleLogout)
@@ -87,6 +91,19 @@ func (s *Server) routes() http.Handler {
 	// routes are admin-gated in the handler: 401 unauthenticated, 403 non-admin.
 	mux.HandleFunc("GET /api/v1/admin/rbac/config", s.handleRBACConfig)
 	mux.HandleFunc("GET /api/v1/admin/rbac/effective", s.handleRBACEffective)
+
+	// First-party user administration (ADR-0011). All admin-gated in-handler.
+	mux.HandleFunc("GET /api/v1/users", s.handleListUsers)
+	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)
+	mux.HandleFunc("PATCH /api/v1/users/{id}", s.handleUpdateUser)
+	mux.HandleFunc("DELETE /api/v1/users/{id}", s.handleDeleteUser)
+
+	// Per-cluster agent enrollment tokens (ADR-0010). Admin-gated in-handler;
+	// require a durable store (enrollment tokens are not re-derivable).
+	mux.HandleFunc("GET /api/v1/enrollment-defaults", s.handleEnrollmentDefaults)
+	mux.HandleFunc("GET /api/v1/enrollment-tokens", s.handleListEnrollmentTokens)
+	mux.HandleFunc("POST /api/v1/enrollment-tokens", s.handleCreateEnrollmentToken)
+	mux.HandleFunc("POST /api/v1/enrollment-tokens/{id}/revoke", s.handleRevokeEnrollmentToken)
 
 	// Live updates.
 	mux.HandleFunc("GET /api/v1/stream", s.handleStream)

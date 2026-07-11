@@ -2,13 +2,11 @@ package agentlink
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -30,57 +28,44 @@ const queryTimeout = 30 * time.Second
 // against an abusive/unauthenticated peer opening unbounded streams.
 const maxAgentStreams = 64
 
-// envAllowInsecureAgents is the explicit local-dev opt-in that permits the
-// legacy "accept any non-empty token" behavior when no enrollment token is
-// configured. Default (unset) is fail-closed: the gateway refuses to start and
-// rejects agent connections rather than trusting any caller that can reach the
-// port. See SEC-1.
-const envAllowInsecureAgents = "LOTSMAN_AGENT_ALLOW_INSECURE"
-
-// allowInsecureAgentsFromEnv reports whether the operator explicitly opted into
-// the insecure accept-any-token dev mode via LOTSMAN_AGENT_ALLOW_INSECURE.
-func allowInsecureAgentsFromEnv() bool {
-	switch os.Getenv(envAllowInsecureAgents) {
-	case "1", "true", "TRUE", "True", "yes", "on":
-		return true
-	default:
-		return false
-	}
+// EnrollmentValidator authenticates an agent's Hello{cluster, token} pair
+// against the control-plane's issued per-cluster enrollment tokens (ADR-0010).
+// It is satisfied by *enrollment.Validator; declared here as an interface so
+// agentlink need not import the enrollment package (which imports store) — that
+// keeps the dependency one-directional and avoids an import cycle.
+type EnrollmentValidator interface {
+	ValidateEnrollment(ctx context.Context, cluster, token string) error
 }
 
 // Gateway is the control-plane side: it accepts inbound agent connections and
 // exposes each as a Link via the OnConnect callback. The control plane's cluster
 // registry consumes those Links.
 type Gateway struct {
-	addr  string
-	token string // expected agent enrollment token ("" = none configured)
-	// allowInsecure permits the legacy accept-any-non-empty-token behavior when
-	// token is "". Default false (fail-closed); enabled only via the explicit
-	// LOTSMAN_AGENT_ALLOW_INSECURE opt-in for local dev. See SEC-1.
-	allowInsecure bool
-	logger        *slog.Logger
-	onConnect     func(Link)
-	onDisconnect  func(Link)
+	addr string
+	// validator gates every agent Hello against the issued per-cluster enrollment
+	// tokens. There is no shared-token or accept-any fallback (ADR-0010); a nil
+	// validator rejects all agents.
+	validator    EnrollmentValidator
+	logger       *slog.Logger
+	onConnect    func(Link)
+	onDisconnect func(Link)
 
 	srv *grpc.Server
 	pb.UnimplementedAgentServiceServer
 }
 
-// NewGateway constructs the agent gateway. token is the shared enrollment secret
-// every agent must present in its Hello. When token is empty the gateway is
-// fail-closed by default (SEC-1): it refuses to start and rejects agents, unless
-// the operator sets LOTSMAN_AGENT_ALLOW_INSECURE=1 to re-enable the legacy
-// local-dev "accept any non-empty token" behavior. onConnect is called once per
+// NewGateway constructs the agent gateway. validator authenticates each agent's
+// Hello{cluster, token} against the persisted per-cluster enrollment tokens
+// (ADR-0010); a nil validator rejects every agent. onConnect is called once per
 // agent that successfully connects and authenticates; onDisconnect once per such
 // agent when its stream ends (nil is allowed).
-func NewGateway(addr, token string, logger *slog.Logger, onConnect, onDisconnect func(Link)) *Gateway {
+func NewGateway(addr string, validator EnrollmentValidator, logger *slog.Logger, onConnect, onDisconnect func(Link)) *Gateway {
 	return &Gateway{
-		addr:          addr,
-		token:         token,
-		allowInsecure: allowInsecureAgentsFromEnv(),
-		logger:        logger,
-		onConnect:     onConnect,
-		onDisconnect:  onDisconnect,
+		addr:         addr,
+		validator:    validator,
+		logger:       logger,
+		onConnect:    onConnect,
+		onDisconnect: onDisconnect,
 	}
 }
 
@@ -89,12 +74,12 @@ func NewGateway(addr, token string, logger *slog.Logger, onConnect, onDisconnect
 // credentials.NewTLS(...) with a client-CA-verified config; for local dev the
 // link is plaintext and Hello.token gates enrollment.
 func (g *Gateway) Start(ctx context.Context) error {
-	// Fail closed: without a configured enrollment token, any caller that can
-	// reach the port could register an arbitrary cluster and receive proxied
-	// user queries. Refuse to start unless the operator explicitly opted into the
-	// insecure local-dev mode (SEC-1).
-	if g.token == "" && !g.allowInsecure {
-		return fmt.Errorf("agentlink: refusing to start: no enrollment token configured (set LOTSMAN_AGENT_TOKEN); for local dev only, set %s=1 to accept any non-empty token", envAllowInsecureAgents)
+	// Fail closed: without a validator the gateway cannot authenticate any agent,
+	// so any caller that can reach the port could register an arbitrary cluster and
+	// receive proxied user queries. Refuse to start rather than accept unauthenticated
+	// agents (ADR-0010).
+	if g.validator == nil {
+		return fmt.Errorf("agentlink: refusing to start: no enrollment validator configured")
 	}
 
 	lis, err := net.Listen("tcp", g.addr)
@@ -120,11 +105,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 	)
 	pb.RegisterAgentServiceServer(g.srv, g)
 
-	if g.token == "" {
-		g.logger.Warn("agent gateway running in INSECURE mode (LOTSMAN_AGENT_ALLOW_INSECURE set): accepting ANY non-empty enrollment token — local dev only, never in production")
-	} else {
-		g.logger.Info("agent gateway enrollment: token-gated (constant-time compare)")
-	}
+	g.logger.Info("agent gateway enrollment: per-cluster token validation (ADR-0010)")
 	g.logger.Info("agent gateway listening", "addr", g.addr)
 
 	// Stop serving when the parent ctx is cancelled.
@@ -172,25 +153,19 @@ func (g *Gateway) Connect(stream pb.AgentService_ConnectServer) error {
 	if hello.GetCluster() == "" {
 		return status.Error(codes.InvalidArgument, "agentlink: hello missing cluster")
 	}
-	// Enrollment auth. When a token is configured, require a constant-time match
-	// (so the gateway can't be impersonated by any caller that can reach the
-	// port). When none is configured, fail closed (reject) unless the operator
-	// explicitly opted into the insecure local-dev "any non-empty token" mode
-	// (SEC-1). This mirrors the Start-time refusal as defense in depth for callers
-	// that register the gateway directly on a grpc.Server. In production mTLS
-	// carries identity and this becomes a CA/SPIFFE check (ADR-0002).
-	if hello.GetToken() == "" {
-		return status.Error(codes.Unauthenticated, "agentlink: hello missing token")
+	// Enrollment auth (ADR-0010): validate the Hello{cluster, token} pair against
+	// the persisted per-cluster enrollment tokens. Every failure — unknown, revoked,
+	// expired, wrong cluster, or an ephemeral store — maps to a single generic
+	// Unauthenticated so a caller cannot distinguish them (no enumeration oracle).
+	// A nil validator (misconfiguration) rejects, mirroring the Start-time refusal.
+	// In production mTLS carries identity and this becomes a CA/SPIFFE check (ADR-0002).
+	if g.validator == nil {
+		g.logger.Warn("agent rejected: gateway has no enrollment validator", "cluster", hello.GetCluster())
+		return status.Error(codes.Unauthenticated, "agentlink: gateway misconfigured (no enrollment validator); refusing connection")
 	}
-	if g.token == "" {
-		if !g.allowInsecure {
-			g.logger.Warn("agent rejected: gateway has no enrollment token and insecure mode is disabled", "cluster", hello.GetCluster())
-			return status.Error(codes.Unauthenticated, "agentlink: gateway misconfigured (no enrollment token); refusing connection")
-		}
-		// Insecure dev opt-in: any non-empty token (checked above) is accepted.
-	} else if subtle.ConstantTimeCompare([]byte(hello.GetToken()), []byte(g.token)) != 1 {
-		g.logger.Warn("agent rejected: invalid enrollment token", "cluster", hello.GetCluster())
-		return status.Error(codes.Unauthenticated, "agentlink: invalid enrollment token")
+	if err := g.validator.ValidateEnrollment(stream.Context(), hello.GetCluster(), hello.GetToken()); err != nil {
+		g.logger.Warn("agent rejected: enrollment validation failed", "cluster", hello.GetCluster(), "err", err)
+		return status.Error(codes.Unauthenticated, "agentlink: enrollment validation failed")
 	}
 
 	g.logger.Info("agent connected",

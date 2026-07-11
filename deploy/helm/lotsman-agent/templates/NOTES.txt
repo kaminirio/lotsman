@@ -1,0 +1,30 @@
+Lotsman agent "{{ .Release.Name }}" is deploying to namespace {{ .Release.Namespace }}.
+
+  cluster name : {{ .Values.config.cluster }}
+  control plane: {{ .Values.config.controlPlaneAddr }}
+
+1. Wait for the agent to come up and dial out:
+
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "lotsman-agent.fullname" . }}
+   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "lotsman-agent.fullname" . }} -f
+
+2. Confirm it registered — the control plane's cluster list should now include
+   "{{ .Values.config.cluster }}":
+
+   curl http://<control-plane>/api/v1/clusters | jq
+
+Checklist if it does not connect:
+  - agentToken.value is the enrollment token minted on the control plane for THIS
+    cluster name ({{ .Values.config.cluster }}); a token for another name is rejected.
+  - config.controlPlaneAddr is reachable from THIS cluster (agents dial OUT).
+  - config.cluster is UNIQUE across all agent installs.
+{{- if eq .Values.agentToken.value "change-me" }}
+
+⚠  agentToken.value is still the default "change-me". Mint a real per-cluster token:
+     lotsman cluster-token generate {{ .Values.config.cluster }} --api http://<control-plane>:8080
+{{- end }}
+{{- if .Values.rbac.envReveal }}
+
+⚠  rbac.envReveal=true: this agent can read EVERY Secret in the cluster. Ensure
+   this is a trusted, single-tenant cluster.
+{{- end }}

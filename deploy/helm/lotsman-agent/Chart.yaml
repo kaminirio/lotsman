@@ -1,0 +1,22 @@
+apiVersion: v2
+name: lotsman-agent
+description: |-
+  Lotsman in-cluster agent — runs in EACH monitored cluster, reads cluster data
+  through the source-agnostic adapters (Kubernetes, Loki, VictoriaMetrics,
+  ArgoCD), and dials OUT to a central lotsman-control-plane over the gRPC agent
+  link. Install one release per cluster, each with its own LOTSMAN_CLUSTER name
+  and pointed at the same control plane + shared agent token.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - monitoring
+  - observability
+  - agent
+home: https://github.com/kaminirio/lotsman
+sources:
+  - https://github.com/kaminirio/lotsman
+maintainers:
+  - name: kaminirio
+    url: https://github.com/kaminirio

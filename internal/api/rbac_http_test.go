@@ -46,14 +46,29 @@ func (failingResolver) Provider(string) (sources.Provider, error) {
 
 func (failingResolver) Clusters() []string { return nil }
 
+// durableStore wraps any Store but reports Durable()==true, so tests that
+// exercise the enrollment endpoints (which refuse an ephemeral store) can run
+// against the in-memory store without a live Postgres.
+type durableStore struct{ store.Store }
+
+func (durableStore) Durable() bool { return true }
+
+// testServer builds an API server backed by a durable in-memory store — the
+// common case, since only the enrollment endpoints care about durability.
 func testServer(t *testing.T, ssoJSON string, incs ...*model.Incident) *Server {
+	t.Helper()
+	return testServerWithStore(t, ssoJSON, durableStore{store.NewMemory()}, incs...)
+}
+
+// testServerWithStore builds an API server backed by the given store, so a test
+// can exercise the ephemeral-store (non-durable) code paths explicitly.
+func testServerWithStore(t *testing.T, ssoJSON string, st store.Store, incs ...*model.Incident) *Server {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mgr, err := auth.NewManagerErr(ssoJSON, logger)
 	if err != nil {
 		t.Fatalf("build auth manager: %v", err)
 	}
-	st := store.NewMemory()
 	for _, inc := range incs {
 		if err := st.SaveIncident(context.Background(), inc); err != nil {
 			t.Fatalf("seed incident: %v", err)

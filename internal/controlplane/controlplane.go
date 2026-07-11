@@ -14,6 +14,7 @@ import (
 	"lotsman/internal/auth"
 	"lotsman/internal/config"
 	"lotsman/internal/engine"
+	"lotsman/internal/enrollment"
 	"lotsman/internal/events"
 	"lotsman/internal/sources"
 	"lotsman/internal/sources/argocd"
@@ -112,29 +113,53 @@ func New(ctx context.Context, cfg config.Server, logger *slog.Logger) (*ControlP
 		registry.persistCluster(cfg.Cluster, true)
 	}
 
-	gateway := agentlink.NewGateway(cfg.GatewayAddr, cfg.AgentToken, logger, registry.OnAgentConnect, registry.OnAgentDisconnect)
+	// The agent gateway authenticates each agent's Hello against the per-cluster
+	// enrollment tokens issued through the API and persisted in the store.
+	// Enrollment tokens MUST be durable (they are not re-derivable): without a
+	// Postgres store the API refuses to mint them and the gateway refuses to
+	// validate them, so agent onboarding is disabled. Direct mode has no agents,
+	// so it is unaffected.
+	if !cfg.DirectMode && !st.Durable() {
+		logger.Warn("agent enrollment disabled: in-memory store cannot persist enrollment tokens; set LOTSMAN_DATABASE_URL to onboard agents")
+	}
+	validator := enrollment.NewValidator(st)
+	gateway := agentlink.NewGateway(cfg.GatewayAddr, validator, logger, registry.OnAgentConnect, registry.OnAgentDisconnect)
 
 	// Incident bus fans detected/investigated incidents out to live SSE clients.
 	bus := events.NewIncidentBus()
 
-	// Auth. An empty SSO config keeps everyone Anonymous (local dev). A present
-	// config enables GitHub OAuth + JWT sessions + RBAC. A present-but-INVALID
-	// config is fatal: we refuse to start rather than silently degrade to the
-	// anonymous-global-admin path (which would turn a config typo in production
-	// into an unauthenticated-admin exposure). The empty-config dev path is
-	// unchanged.
-	authMgr, authErr := auth.NewManagerErr(cfg.SSOConfig, logger)
+	// Auth (ADR-0011). Local username/password auth is ALWAYS on — there is no
+	// anonymous path. A first admin is seeded idempotently from
+	// LOTSMAN_ADMIN_USER/PASSWORD; GitHub/Google/Azure SSO are each active only
+	// when configured. The auth manager and the API share the same store so
+	// admin-provisioned accounts are immediately usable.
+	authMgr, authErr := auth.NewManagerFromEnv(auth.Config{
+		SessionSecret:  cfg.Auth.SessionSecret,
+		BaseURL:        cfg.Auth.BaseURL,
+		UIURL:          cfg.Auth.UIURL,
+		AllowedDomains: cfg.Auth.AllowedDomains,
+		GitHub:         auth.ProviderCreds{ClientID: cfg.Auth.GitHubClientID, ClientSecret: cfg.Auth.GitHubClientSecret},
+		Google:         auth.ProviderCreds{ClientID: cfg.Auth.GoogleClientID, ClientSecret: cfg.Auth.GoogleClientSecret},
+		Azure:          auth.ProviderCreds{ClientID: cfg.Auth.AzureClientID, ClientSecret: cfg.Auth.AzureClientSecret, Tenant: cfg.Auth.AzureTenant},
+	}, st, logger)
 	if authErr != nil {
-		if cfg.SSOConfig != "" {
-			return nil, fmt.Errorf("controlplane: SSO config supplied but invalid (refusing to start in anonymous mode): %w", authErr)
-		}
-		logger.Error("SSO config error", "error", authErr)
+		return nil, fmt.Errorf("controlplane: building auth manager: %w", authErr)
 	}
-	if authMgr.Enabled() {
-		for _, warn := range authMgr.Config().Warnings() {
-			logger.Warn("SSO config warning", "warning", warn)
+	for name, on := range authMgr.ProviderStatus() {
+		if on {
+			logger.Info("auth: SSO provider enabled", "provider", name)
 		}
-		logger.Info("auth: GitHub OAuth + JWT sessions enabled")
+	}
+
+	// Seed the bootstrap admin idempotently, then warn loudly if the deployment
+	// still has no way in (no active admin and no bootstrap credentials).
+	if err := auth.EnsureBootstrapAdmin(ctx, st, cfg.Auth.AdminUser, cfg.Auth.AdminPassword, logger); err != nil {
+		return nil, err
+	}
+	if n, err := st.CountActiveAdmins(ctx); err != nil {
+		logger.Warn("could not count admins", "error", err)
+	} else if n == 0 {
+		logger.Warn("no active admin accounts exist and no LOTSMAN_ADMIN_USER/PASSWORD configured — nobody can log in; set them to seed the first admin")
 	}
 
 	// Optional LLM incident-explainer. Disabled (Available()==false) when no LLM
@@ -156,6 +181,10 @@ func New(ctx context.Context, cfg config.Server, logger *slog.Logger) (*ControlP
 		Bus:       bus,
 		Sources:   registry,
 		Explainer: explainer,
+
+		PublicGatewayAddr: cfg.PublicGatewayAddr,
+		AgentChart:        cfg.AgentChart,
+		AgentChartVersion: cfg.AgentChartVersion,
 	}, logger)
 	if err != nil {
 		return nil, err

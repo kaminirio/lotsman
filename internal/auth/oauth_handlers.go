@@ -1,12 +1,9 @@
 package auth
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -18,15 +15,12 @@ const (
 	stateCookieTTL = 5 * time.Minute
 )
 
-// HandleLogin redirects the user to GitHub's authorization URL.
-// Route: GET /auth/login/{provider}.
+// HandleLogin redirects the user to the named provider's authorization URL.
+// Route: GET /auth/login/{provider}. A provider that is not configured 404s.
 func (m *Manager) HandleLogin(w http.ResponseWriter, r *http.Request) {
-	if !m.enabled {
-		http.Error(w, "SSO is not configured", http.StatusNotFound)
-		return
-	}
-	if r.PathValue("provider") != "github" {
-		http.Error(w, "unknown provider: only github is supported", http.StatusBadRequest)
+	p, ok := m.providers[r.PathValue("provider")]
+	if !ok {
+		http.Error(w, "unknown or unconfigured provider", http.StatusNotFound)
 		return
 	}
 
@@ -44,22 +38,21 @@ func (m *Manager) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   int(stateCookieTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   m.cfg.Secure(),
+		Secure:   m.secureCookies,
 	})
 
-	authURL := m.cfg.GitHubOAuth2Config().AuthCodeURL(state)
-	http.Redirect(w, r, authURL, http.StatusFound)
+	http.Redirect(w, r, p.AuthCodeURL(state), http.StatusFound)
 }
 
-// HandleCallback processes the GitHub OAuth2 callback, applies the allowlist,
-// and issues the session cookie. Route: GET /auth/callback/{provider}.
+// HandleCallback processes an OAuth2 callback: it verifies the CSRF state,
+// exchanges the code, fetches the verified identity, resolves it to a store
+// account (ADR-0011 mapping rule), and issues the session cookie. Route:
+// GET /auth/callback/{provider}.
 func (m *Manager) HandleCallback(w http.ResponseWriter, r *http.Request) {
-	if !m.enabled {
-		http.Error(w, "SSO is not configured", http.StatusNotFound)
-		return
-	}
-	if r.PathValue("provider") != "github" {
-		http.Error(w, "unknown provider", http.StatusBadRequest)
+	provider := r.PathValue("provider")
+	p, ok := m.providers[provider]
+	if !ok {
+		http.Error(w, "unknown or unconfigured provider", http.StatusBadRequest)
 		return
 	}
 
@@ -95,69 +88,37 @@ func (m *Manager) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oauthCfg := m.cfg.GitHubOAuth2Config()
-	oauth2Token, err := oauthCfg.Exchange(r.Context(), code)
+	token, err := p.Exchange(r.Context(), code)
 	if err != nil {
-		m.logger.Error("OAuth code exchange failed", "error", err)
-		m.redirectError(w, r, "Authentication failed")
-		return
-	}
-	accessToken := oauth2Token.AccessToken
-	if accessToken == "" {
-		m.logger.Error("no access token in OAuth response")
+		m.logger.Error("OAuth code exchange failed", "provider", provider, "error", err)
 		m.redirectError(w, r, "Authentication failed")
 		return
 	}
 
-	ghUser, err := m.fetchGitHubUser(r.Context(), accessToken)
+	ident, err := p.FetchIdentity(r.Context(), token)
 	if err != nil {
-		m.logger.Error("failed to fetch GitHub user", "error", err)
+		m.logger.Error("failed to fetch identity", "provider", provider, "error", err)
 		m.redirectError(w, r, "Authentication failed")
 		return
 	}
 
-	// Resolve org/team memberships BEFORE the login gate: a user authorized only
-	// via a group binding (no per-user binding or allowlist entry) must be allowed
-	// in, so the gate has to know their groups first. Still resolve only when group
-	// bindings are configured — no point spending two extra GitHub API calls
-	// otherwise. On error (including a missing read:org grant) groups degrade to
-	// empty and group_bindings simply won't apply for this user (graceful
-	// degradation).
-	var groups []string
-	if len(m.cfg.GroupBindings) > 0 {
-		groups = m.fetchGitHubGroups(r.Context(), accessToken)
-	}
-
-	if !m.cfg.IsLoginAllowed(ghUser.Login, groups) {
-		m.logger.Warn("GitHub login denied: not in allowlist and no matching group binding", "login", ghUser.Login)
-		m.redirectError(w, r, "Access denied: your GitHub account is not authorized")
+	user, err := m.resolveSSOUser(r, provider, ident)
+	if err != nil {
+		m.logger.Warn("SSO login denied", "provider", provider, "email", ident.Email, "reason", err.Error())
+		m.redirectError(w, r, "Access denied: no authorized account for this identity")
 		return
 	}
 
-	email := ghUser.Email
-	if email == "" {
-		email, _ = m.fetchGitHubPrimaryEmail(r.Context(), accessToken)
-	}
-
-	sessionToken, err := MintSession([]byte(m.cfg.SessionSecret), ghUser.Login, email, ghUser.Name, "github", groups, sessionTTL)
+	sessionToken, err := MintSession(m.sessionSecret, user.Username, user.Email, user.Username, provider, nil, sessionTTL)
 	if err != nil {
 		m.logger.Error("failed to mint session", "error", err)
 		m.redirectError(w, r, "Authentication failed")
 		return
 	}
+	m.setSessionCookie(w, sessionToken)
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    sessionToken,
-		Path:     "/",
-		MaxAge:   int(sessionTTL.Seconds()),
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   m.cfg.Secure(),
-	})
-
-	m.logger.Info("user authenticated", "login", ghUser.Login, "provider", "github")
-	http.Redirect(w, r, m.cfg.UIURL, http.StatusFound)
+	m.logger.Info("user authenticated", "login", user.Username, "provider", provider)
+	http.Redirect(w, r, m.uiURL, http.StatusFound)
 }
 
 // HandleLogout revokes the current session and clears the cookie. Revoking the
@@ -170,7 +131,7 @@ func (m *Manager) HandleCallback(w http.ResponseWriter, r *http.Request) {
 func (m *Manager) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	if m.enabled && m.revoked != nil {
 		if ck, err := r.Cookie(sessionCookie); err == nil && ck.Value != "" {
-			if claims, err := VerifySession([]byte(m.cfg.SessionSecret), ck.Value); err == nil && claims.ExpiresAt != nil {
+			if claims, err := VerifySession(m.sessionSecret, ck.Value); err == nil && claims.ExpiresAt != nil {
 				// Revoke the lineage (sid) so the whole refresh chain dies; fall back to
 				// the jti for pre-sid tokens. Both are self-bounded to the token's expiry.
 				key := claims.SID
@@ -193,7 +154,7 @@ func (m *Manager) HandleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) redirectError(w http.ResponseWriter, r *http.Request, msg string) {
-	target := m.cfg.UIURL + "/login?error=" + url.QueryEscape(msg)
+	target := m.uiURL + "/login?error=" + url.QueryEscape(msg)
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
@@ -203,147 +164,4 @@ func generateState() (string, error) {
 		return "", err
 	}
 	return base64.URLEncoding.EncodeToString(b), nil
-}
-
-// gitHubUser represents a GitHub user from the /user API.
-type gitHubUser struct {
-	Login     string `json:"login"`
-	Name      string `json:"name"`
-	Email     string `json:"email"`
-	AvatarURL string `json:"avatar_url"`
-	ID        int64  `json:"id"`
-}
-
-// fetchGitHubUser calls the GitHub API to get the authenticated user.
-func (m *Manager) fetchGitHubUser(ctx context.Context, token string) (*gitHubUser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := m.httpClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GitHub API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var user gitHubUser
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		return nil, fmt.Errorf("decoding GitHub user: %w", err)
-	}
-	return &user, nil
-}
-
-// fetchGitHubPrimaryEmail fetches the user's primary verified email from GitHub.
-func (m *Manager) fetchGitHubPrimaryEmail(ctx context.Context, token string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user/emails", nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := m.httpClient().Do(req)
-	if err != nil {
-		return "", fmt.Errorf("GitHub emails API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub emails API returned %d", resp.StatusCode)
-	}
-
-	var emails []struct {
-		Email    string `json:"email"`
-		Primary  bool   `json:"primary"`
-		Verified bool   `json:"verified"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&emails); err != nil {
-		return "", fmt.Errorf("decoding GitHub emails: %w", err)
-	}
-
-	for _, e := range emails {
-		if e.Primary && e.Verified {
-			return e.Email, nil
-		}
-	}
-	for _, e := range emails {
-		if e.Verified {
-			return e.Email, nil
-		}
-	}
-	return "", fmt.Errorf("no verified email found")
-}
-
-// fetchGitHubGroups resolves the authenticated user's group memberships for
-// group-based RBAC: org slugs (e.g. "acme") from GET /user/orgs and "org/team"
-// slugs from GET /user/teams. Both require the read:org scope. On any error
-// (including a missing read:org grant) it logs a Warn and returns an empty slice
-// — group_bindings then simply won't apply, which is intentional graceful
-// degradation rather than a login failure.
-func (m *Manager) fetchGitHubGroups(ctx context.Context, token string) []string {
-	var groups []string
-
-	var orgs []struct {
-		Login string `json:"login"`
-	}
-	if err := m.getGitHubJSON(ctx, token, "https://api.github.com/user/orgs", &orgs); err != nil {
-		m.logger.Warn("failed to fetch GitHub orgs; group bindings will not apply", "error", err)
-		return nil
-	}
-	for _, o := range orgs {
-		if o.Login != "" {
-			groups = append(groups, o.Login)
-		}
-	}
-
-	var teams []struct {
-		Slug         string `json:"slug"`
-		Organization struct {
-			Login string `json:"login"`
-		} `json:"organization"`
-	}
-	if err := m.getGitHubJSON(ctx, token, "https://api.github.com/user/teams", &teams); err != nil {
-		m.logger.Warn("failed to fetch GitHub teams; team bindings will not apply", "error", err)
-		return groups
-	}
-	for _, t := range teams {
-		if t.Organization.Login != "" && t.Slug != "" {
-			groups = append(groups, t.Organization.Login+"/"+t.Slug)
-		}
-	}
-	return groups
-}
-
-// getGitHubJSON performs a timeout-bounded authenticated GET against the GitHub
-// API and decodes the JSON body into out.
-func (m *Manager) getGitHubJSON(ctx context.Context, token, url string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := m.httpClient().Do(req)
-	if err != nil {
-		return fmt.Errorf("GitHub API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(body))
-	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decoding GitHub response: %w", err)
-	}
-	return nil
 }

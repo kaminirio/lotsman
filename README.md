@@ -142,6 +142,43 @@ non-root/read-only securityContext, probes, RBAC). See the full
 [**Production install guide**](docs/INSTALL.md) for direct vs. agent mode,
 multi-cluster agents, external Postgres, SSO/OAuth, and upgrades.
 
+## Deploy with Helm
+
+Two charts under [`deploy/helm`](deploy/helm) mirror the topology — install the
+**control plane** once centrally, then an **agent** in each monitored cluster:
+
+```sh
+# One reachable cluster (direct mode, no agent):
+helm install lotsman ./deploy/helm/lotsman-control-plane \
+  --namespace lotsman --create-namespace \
+  --set config.directMode=true --set config.cluster=local
+
+# Central control plane + per-cluster agents:
+
+# 1. Install the control plane. Agent onboarding needs a DURABLE store (enrollment
+#    tokens can't be re-derived), so point it at Postgres — without a DB, minting
+#    returns 503 and agents are rejected:
+helm install lotsman ./deploy/helm/lotsman-control-plane \
+  -n lotsman --create-namespace \
+  --set config.databaseUrl='postgres://USER:PASS@HOST:5432/lotsman?sslmode=disable'
+
+# 2. Mint a per-cluster enrollment token on the control plane:
+TOKEN=$(lotsman cluster-token generate prod-eu \
+  --api http://lotsman.example.com:8080)
+
+# 3. Install the agent in the target cluster with its token:
+helm install lotsman-agent ./deploy/helm/lotsman-agent \
+  -n lotsman --create-namespace \
+  --set config.cluster=prod-eu \
+  --set config.controlPlaneAddr=lotsman.example.com:9090 \
+  --set agentToken.value="$TOKEN"
+```
+
+Each agent cluster gets its own token — revoking one does not affect others.
+Full options, multi-cluster layout, token management, and the opt-in Secret
+env-reveal grant are in [`deploy/helm/README.md`](deploy/helm/README.md). The raw
+manifests in [`deploy/local/k8s`](deploy/local/k8s) remain the local-dev quickstart.
+
 ## Project layout
 
 | Path | What |
@@ -155,6 +192,8 @@ multi-cluster agents, external Postgres, SSO/OAuth, and upgrades.
 | `internal/auth` · `internal/rbac` | sessions, GitHub OAuth, config-driven RBAC |
 | `internal/store` | persistence (in-memory or Postgres, selected by config) |
 | `ui/` | Next.js app (embedded into the control-plane binary) |
+| `deploy/helm` | Helm charts: `lotsman-control-plane` + `lotsman-agent` |
+| `deploy/local/k8s` | raw manifests for the local-dev stack |
 
 ## Status
 

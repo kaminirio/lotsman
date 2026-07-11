@@ -16,3 +16,6 @@ __pycache__/
 # Local agent/assistant config and private dev instructions (not for the public repo).
 /.claude/
 /CLAUDE.md
+
+# JetBrains IDE project files.
+/.idea/

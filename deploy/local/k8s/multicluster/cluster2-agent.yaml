@@ -96,5 +96,8 @@ spec:
               value: "<CLUSTER1_NODE_IP>:30090"
             - name: LOTSMAN_CLUSTER
               value: "local-2"
+            # Per-cluster enrollment token. PLACEHOLDER — mint one for cluster
+            # "local-2" on cluster1's control plane and replace this value
+            # (`lotsman cluster-token generate local-2`); "dev-token" is rejected.
             - name: LOTSMAN_AGENT_TOKEN
               value: "dev-token"

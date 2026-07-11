@@ -31,11 +31,12 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Only guard the API; the embedded UI assets are public. /auth/logout is a
-		// state-changing endpoint that lives outside /api/v1, so CSRF-guard it here
-		// (a cross-site form must not be able to force a logout).
+		// Only guard the API; the embedded UI assets are public. State-changing auth
+		// endpoints outside /api/v1 — POST /auth/login (local login) and
+		// POST /auth/logout — are session-optional but still CSRF-guarded, so a
+		// cross-site form cannot force a login or logout.
 		if !strings.HasPrefix(r.URL.Path, "/api/v1/") {
-			if r.URL.Path == "/auth/logout" && isMutation(r.Method) && r.Header.Get("X-Requested-With") == "" {
+			if isMutation(r.Method) && r.Header.Get("X-Requested-With") == "" {
 				http.Error(w, "missing X-Requested-With header", http.StatusForbidden)
 				return
 			}
@@ -81,8 +82,11 @@ func isUnprotected(path string) bool {
 	case "/healthz", "/api/v1/version", "/auth/providers":
 		return true
 	}
-	// The OAuth handshake endpoints must be reachable while logged out.
-	return strings.HasPrefix(path, "/auth/login") ||
+	// The OAuth handshake endpoints must be reachable while logged out. The trailing
+	// slash on "/auth/login/" keeps the bare POST /auth/login (local login) OUT of
+	// the fully-public set so it stays CSRF-guarded, while /auth/login/{provider}
+	// (the SSO redirect) is public.
+	return strings.HasPrefix(path, "/auth/login/") ||
 		strings.HasPrefix(path, "/auth/callback")
 }
 

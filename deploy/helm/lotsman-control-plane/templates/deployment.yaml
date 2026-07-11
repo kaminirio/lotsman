@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lotsman-control-plane.fullname" . }}
+  labels:
+    {{- include "lotsman-control-plane.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "lotsman-control-plane.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lotsman-control-plane.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "lotsman-control-plane.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: control-plane
+          image: {{ include "lotsman-control-plane.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: LOTSMAN_ADDR
+              value: {{ .Values.config.addr | quote }}
+            - name: LOTSMAN_GATEWAY_ADDR
+              value: {{ .Values.config.gatewayAddr | quote }}
+            # No shared agent token: the gateway authenticates agents against
+            # per-cluster enrollment tokens minted via the admin API
+            # (POST /api/v1/enrollment-tokens or `lotsman cluster-token generate`).
+            - name: LOTSMAN_SEED
+              value: {{ .Values.config.seed | ternary "1" "0" | quote }}
+            - name: LOTSMAN_SCAN_INTERVAL
+              value: {{ .Values.config.scanInterval | quote }}
+            {{- if .Values.config.directMode }}
+            - name: LOTSMAN_DIRECT_MODE
+              value: "1"
+            - name: LOTSMAN_CLUSTER
+              value: {{ .Values.config.cluster | quote }}
+            {{- end }}
+            {{- with .Values.config.llm.url }}
+            - name: LOTSMAN_LLM_URL
+              value: {{ . | quote }}
+            - name: LOTSMAN_LLM_MODEL
+              value: {{ $.Values.config.llm.model | quote }}
+            {{- end }}
+            {{- with .Values.config.databaseUrl }}
+            - name: LOTSMAN_DATABASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.ssoConfig }}
+            - name: LOTSMAN_SSO_CONFIG
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.enrollment.publicGatewayAddr }}
+            - name: LOTSMAN_PUBLIC_GATEWAY_ADDR
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.enrollment.agentChart }}
+            - name: LOTSMAN_AGENT_CHART
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.enrollment.agentChartVersion }}
+            - name: LOTSMAN_AGENT_CHART_VERSION
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: api
+              containerPort: 8080
+            - name: gateway
+              containerPort: 9090
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

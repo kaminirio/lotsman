@@ -138,14 +138,14 @@ func VerifySession(secret []byte, tokenStr string) (*SessionClaims, error) {
 // re-login). Best-effort: a mint failure is logged and the existing (still-valid)
 // cookie is left in place.
 func (m *Manager) refreshSession(w http.ResponseWriter, r *http.Request) {
-	if !m.enabled || m.cfg == nil {
+	if !m.enabled {
 		return
 	}
 	ck, err := r.Cookie(sessionCookie)
 	if err != nil || ck.Value == "" {
 		return
 	}
-	claims, err := VerifySession([]byte(m.cfg.SessionSecret), ck.Value)
+	claims, err := VerifySession(m.sessionSecret, ck.Value)
 	if err != nil {
 		return
 	}
@@ -175,7 +175,7 @@ func (m *Manager) refreshSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	token, err := mintSession([]byte(m.cfg.SessionSecret), claims.Login, claims.Email, claims.Name, claims.Provider, claims.Groups, sessionTTL, sid, authTime)
+	token, err := mintSession(m.sessionSecret, claims.Login, claims.Email, claims.Name, claims.Provider, claims.Groups, sessionTTL, sid, authTime)
 	if err != nil {
 		m.logger.Warn("session refresh: mint failed", "error", err)
 		return
@@ -187,8 +187,20 @@ func (m *Manager) refreshSession(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   m.cfg.Secure(),
+		Secure:   m.secureCookies,
 	})
+}
+
+// newUserID returns a random, unguessable account id (ADR-0011), matching the
+// "usr_"-prefixed scheme the users API mints.
+func newUserID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand failure is catastrophic and effectively never happens; fall
+		// back to a time-free constant only to avoid panicking the caller.
+		return "usr_0000000000000000"
+	}
+	return "usr_" + hex.EncodeToString(b)
 }
 
 func generateJTI() (string, error) {

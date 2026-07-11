@@ -1,0 +1,25 @@
+apiVersion: v2
+name: lotsman-control-plane
+description: |-
+  Lotsman control plane — the central server that terminates agent links, runs
+  the correlation engine, persists derived state, and serves the API + embedded
+  Next.js UI. Deploy ONE of these centrally; deploy a lotsman-agent chart in each
+  monitored cluster. For a single reachable cluster, enable directMode and skip
+  the agent entirely.
+type: application
+# Chart version — bump on every chart change (semver).
+version: 0.1.0
+# Tracks the Lotsman app release the chart's default image tag points at.
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - monitoring
+  - observability
+  - incident-investigation
+  - correlation
+home: https://github.com/kaminirio/lotsman
+sources:
+  - https://github.com/kaminirio/lotsman
+maintainers:
+  - name: kaminirio
+    url: https://github.com/kaminirio

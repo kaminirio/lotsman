@@ -19,6 +19,12 @@ import (
 	"lotsman/internal/model"
 )
 
+// acceptAllValidator is a test EnrollmentValidator that authorizes every Hello,
+// so the e2e harness can focus on the Link machinery rather than enrollment.
+type acceptAllValidator struct{}
+
+func (acceptAllValidator) ValidateEnrollment(context.Context, string, string) error { return nil }
+
 // e2eHarness wires a Gateway (as a registered AgentServiceServer) and a Dialer
 // over an in-memory bufconn, returning the control-plane Link the registry would
 // receive once the agent's Hello lands.
@@ -34,11 +40,10 @@ func newE2EHarness(t *testing.T, handler Handler, feed func(context.Context) <-c
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	linkCh := make(chan Link, 1)
-	gw := NewGateway("bufconn", "", logger, func(l Link) { linkCh <- l }, nil)
-	// The e2e harness exercises the accept-any-non-empty-token path, which is now
-	// gated behind the explicit insecure opt-in (SEC-1). See gateway_test.go for
-	// the fail-closed default and token-match paths.
-	gw.allowInsecure = true
+	// The e2e harness exercises the Link machinery (Do/recvLoop/events), not
+	// enrollment, so it wires an accept-all validator. Real enrollment validation is
+	// covered by enrollment_integration_test.go against a live enrollment.Validator.
+	gw := NewGateway("bufconn", acceptAllValidator{}, logger, func(l Link) { linkCh <- l }, nil)
 
 	srv := grpc.NewServer()
 	pb.RegisterAgentServiceServer(srv, gw)
