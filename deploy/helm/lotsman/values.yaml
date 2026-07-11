@@ -1,0 +1,277 @@
+# Default values for the lotsman chart.
+# This is a YAML-formatted file. Values are grouped by component.
+#
+# Two independently toggleable components:
+#   controlPlane — REST API + embedded UI (:8080) and the agent gRPC gateway (:9090)
+#   agent        — in-cluster collector that dials OUT to the control plane
+#
+# Typical topologies:
+#   * Single cluster, direct mode  : controlPlane.enabled=true, controlPlane.directMode.enabled=true, agent.enabled=false
+#   * Single cluster, agent mode   : controlPlane.enabled=true, agent.enabled=true
+#   * Extra clusters (agent only)  : controlPlane.enabled=false, agent.enabled=true, agent.controlPlaneAddr=<gateway of the hub cluster>
+
+# -- Override the chart name used in resource names.
+nameOverride: ""
+# -- Override the fully qualified release name.
+fullnameOverride: ""
+
+image:
+  # -- Container registry hosting the lotsman images.
+  registry: ghcr.io/kaminirio
+  # -- Image pull policy for all workloads.
+  pullPolicy: IfNotPresent
+  # -- Tag applied to all images when the per-image tag is empty. Defaults to
+  # `.Chart.AppVersion`. Pin an immutable `vX.Y.Z` in production.
+  tag: ""
+
+# -- Names of imagePullSecrets for private registries (referenced, not created).
+imagePullSecrets: []
+#  - name: ghcr-pull
+
+# ---------------------------------------------------------------------------
+# Shared secret material. Consumed by the control plane (and the in-tree agent
+# reads the agent token from the same Secret). The chart creates this Secret
+# unless `existingSecret` is set, in which case that Secret must provide the
+# same keys.
+# ---------------------------------------------------------------------------
+secret:
+  # -- Use an already-existing Secret instead of one rendered by this chart.
+  # Must contain the keys named below (agentToken/databaseUrl/ssoConfig).
+  existingSecret: ""
+  # -- Key names inside the Secret (chart-created or existing).
+  keys:
+    agentToken: LOTSMAN_AGENT_TOKEN
+    databaseUrl: LOTSMAN_DATABASE_URL
+    ssoConfig: LOTSMAN_SSO_CONFIG
+    argocdToken: LOTSMAN_ARGOCD_TOKEN
+  # -- Shared enrollment token every agent must present to the gateway. REQUIRED
+  # in production: the gateway is fail-closed without it (SEC-1). Generate with
+  # `openssl rand -hex 32`. Leave empty ONLY when supplying an existingSecret.
+  agentToken: ""
+  # -- External Postgres DSN (LOTSMAN_DATABASE_URL). Empty => in-memory store
+  # (single replica only; state is lost on restart). Example:
+  # postgres://lotsman:pass@postgres.db.svc:5432/lotsman?sslmode=require
+  databaseUrl: ""
+  # -- JSON SSO / OAuth config (LOTSMAN_SSO_CONFIG). Contains `session_secret`
+  # (>= 32 chars, generate with `openssl rand -hex 32`), `base_url`, `ui_url`,
+  # `github.client_id/secret`, and `group_bindings`. Empty disables SSO
+  # (single-user / reverse-proxy-auth deployments). See docs/INSTALL.md.
+  ssoConfig: ""
+  # -- ArgoCD API token (LOTSMAN_ARGOCD_TOKEN) if the ArgoCD adapter needs auth.
+  argocdToken: ""
+
+# ===========================================================================
+# Control plane
+# ===========================================================================
+controlPlane:
+  # -- Deploy the control plane (REST/UI + agent gateway).
+  enabled: true
+  replicaCount: 1
+
+  image:
+    # -- Repository name (joined with `image.registry`).
+    repository: lotsman-server
+    # -- Overrides the shared `image.tag` for this component.
+    tag: ""
+
+  # Application configuration -> rendered into a ConfigMap and env.
+  config:
+    # -- HTTP listen address for REST API + embedded UI.
+    addr: ":8080"
+    # -- gRPC listen address for incoming agent connections.
+    gatewayAddr: ":9090"
+    # -- Logical cluster name for the control plane's own context.
+    cluster: "default"
+    # -- Detector scan interval (Go duration).
+    scanInterval: "30s"
+    # -- Load demo/sample seed data. Keep false in real deployments.
+    seed: false
+
+  # Direct (agentless) mode: the control plane talks to one cluster's backends
+  # itself. Do NOT combine with agent.enabled for the same cluster.
+  directMode:
+    # -- Enable LOTSMAN_DIRECT_MODE=1.
+    enabled: false
+    # -- Backend URLs used in direct mode (leave empty to disable an adapter).
+    lokiUrl: ""
+    victoriaUrl: ""
+    argocdUrl: ""
+
+  # Optional LLM incident-explainer (assistive, off the detection hot path).
+  llm:
+    # -- LOTSMAN_LLM_URL. Empty disables the explainer (endpoint returns 503).
+    url: ""
+    # -- LOTSMAN_LLM_MODEL.
+    model: "gemma3:4b"
+
+  # Extra raw env vars appended verbatim to the container (advanced).
+  extraEnv: []
+  #  - name: LOTSMAN_SOMETHING
+  #    value: "x"
+
+  serviceAccount:
+    # -- Create a ServiceAccount for the control plane.
+    create: true
+    # -- Name of the ServiceAccount (defaults to the control-plane fullname).
+    name: ""
+    annotations: {}
+
+  # REST API + UI Service (:8080).
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+
+  # Agent gRPC gateway Service (:9090). Agents in OTHER clusters must reach this,
+  # so its type is configurable (ClusterIP / LoadBalancer / NodePort).
+  gatewayService:
+    type: ClusterIP
+    port: 9090
+    # -- Only used when type=NodePort (30000-32767). Empty => auto-assigned.
+    nodePort: ""
+    annotations: {}
+    # -- Only used when type=LoadBalancer. Restrict who may reach the gateway.
+    loadBalancerSourceRanges: []
+
+  # Ingress for the REST API + UI (port 8080). The gateway is NOT exposed here
+  # (gRPC — use gatewayService instead).
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: lotsman.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+    #  - secretName: lotsman-tls
+    #    hosts:
+    #      - lotsman.example.com
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  # Pod-level security context.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  # Container-level security context.
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: api
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: api
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  # PodDisruptionBudget (only rendered when replicaCount > 1 or explicitly on).
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+    # maxUnavailable: 1
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+
+# ===========================================================================
+# In-cluster agent (egress-only)
+# ===========================================================================
+agent:
+  # -- Deploy the agent. Disable in direct mode or when only the control plane
+  # is installed in this cluster.
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: lotsman-agent
+    tag: ""
+
+  # -- gRPC address of the control-plane gateway this agent dials OUT to. When
+  # empty AND the control plane is deployed in this same release, it defaults to
+  # the in-cluster gateway Service. Set explicitly for agents in OTHER clusters,
+  # e.g. "203.0.113.10:9090" (LoadBalancer) or "<node-ip>:30090" (NodePort).
+  controlPlaneAddr: ""
+
+  # -- Logical cluster name this agent registers as (must be unique per cluster).
+  cluster: "default"
+
+  # Backend adapter URLs (in-cluster services this agent queries).
+  backends:
+    lokiUrl: "http://loki-gateway.monitoring.svc:80"
+    victoriaUrl: "http://vmselect.monitoring.svc:8481"
+    argocdUrl: "http://argocd-server.argocd.svc:80"
+
+  # Cluster-wide Secret reveal (env-reveal + Secrets browser). DANGEROUS: grants
+  # the agent get/list on ALL Secrets cluster-wide. Only in trusted single-tenant
+  # clusters. Sets LOTSMAN_ALLOW_ENV_REVEAL=1 and adds the secrets RBAC grant.
+  allowEnvReveal: false
+
+  extraEnv: []
+
+  rbac:
+    # -- Create the read ClusterRole + binding the agent needs across the cluster.
+    create: true
+
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}

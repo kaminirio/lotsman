@@ -1,0 +1,31 @@
+{{- if .Values.controlPlane.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lotsman.controlPlane.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lotsman.componentLabels" (dict "root" . "component" "control-plane") | nindent 4 }}
+data:
+  LOTSMAN_ADDR: {{ .Values.controlPlane.config.addr | quote }}
+  LOTSMAN_GATEWAY_ADDR: {{ .Values.controlPlane.config.gatewayAddr | quote }}
+  LOTSMAN_CLUSTER: {{ .Values.controlPlane.config.cluster | quote }}
+  LOTSMAN_SCAN_INTERVAL: {{ .Values.controlPlane.config.scanInterval | quote }}
+  LOTSMAN_SEED: {{ .Values.controlPlane.config.seed | ternary "1" "0" | quote }}
+  {{- if .Values.controlPlane.directMode.enabled }}
+  LOTSMAN_DIRECT_MODE: "1"
+  {{- with .Values.controlPlane.directMode.lokiUrl }}
+  LOTSMAN_LOKI_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.controlPlane.directMode.victoriaUrl }}
+  LOTSMAN_VICTORIA_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.controlPlane.directMode.argocdUrl }}
+  LOTSMAN_ARGOCD_URL: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.controlPlane.llm.url }}
+  LOTSMAN_LLM_URL: {{ . | quote }}
+  {{- end }}
+  LOTSMAN_LLM_MODEL: {{ .Values.controlPlane.llm.model | quote }}
+{{- end }}

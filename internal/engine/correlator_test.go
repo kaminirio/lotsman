@@ -28,6 +28,23 @@ func (f *fakeLogSource) QueryLogs(_ context.Context, _ sources.LogQuery) ([]mode
 	return f.sigs, nil
 }
 
+// blockingLogSource implements sources.LogSource but blocks in QueryLogs until
+// the context is cancelled (e.g. by the per-source timeout), then returns the
+// context error. It records whether it observed cancellation.
+type blockingLogSource struct {
+	name      string
+	cancelled chan struct{}
+}
+
+func (f *blockingLogSource) Name() string { return f.name }
+func (f *blockingLogSource) QueryLogs(ctx context.Context, _ sources.LogQuery) ([]model.Signal, error) {
+	<-ctx.Done()
+	if f.cancelled != nil {
+		close(f.cancelled)
+	}
+	return nil, ctx.Err()
+}
+
 // fakeDeploySource implements sources.DeploymentSource.
 type fakeDeploySource struct {
 	name string
@@ -136,5 +153,86 @@ func TestCorrelatorPartialSourceFailure(t *testing.T) {
 	}
 	if got[1].ID != "e1" {
 		t.Fatalf("second signal: want ID=e1 (k8s event), got %q", got[1].ID)
+	}
+}
+
+// TestCorrelatorPerSourceTimeout pins ENG-2: a source that blocks past the
+// per-source timeout must be skipped (via the deadline), while the remaining
+// sources still return. It also proves the timeout context derives from ctx so
+// cancellation propagates into the blocked source.
+func TestCorrelatorPerSourceTimeout(t *testing.T) {
+	t0 := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
+	t1 := t0.Add(2 * time.Minute)
+
+	changeSig := model.Signal{ID: "c1", Kind: model.SignalChange, Timestamp: t0, Title: "synced"}
+	eventSig := model.Signal{ID: "e1", Kind: model.SignalK8sEvent, Timestamp: t1, Title: "BackOff"}
+
+	blocked := &blockingLogSource{name: "fake/loki", cancelled: make(chan struct{})}
+	provider := sources.NewProvider(
+		"test-cluster",
+		blocked,
+		&fakeMetricSource{},
+		&fakeDeploySource{name: "fake/argocd", sigs: []model.Signal{changeSig}},
+		&fakeClusterSource{name: "fake/k8s", sigs: []model.Signal{eventSig}},
+	)
+
+	corr := NewCorrelator(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	corr.PerSourceTimeout = 50 * time.Millisecond // short so the test is fast
+
+	ref := model.ResourceRef{Cluster: "test-cluster", Namespace: "default", Kind: "Deployment", Name: "api"}
+	rng := sources.TimeRange{Start: t0.Add(-5 * time.Minute), End: t1.Add(5 * time.Minute)}
+
+	start := time.Now()
+	got := corr.Timeline(context.Background(), provider, ref, rng)
+	elapsed := time.Since(start)
+
+	// The blocked source must have observed cancellation (timeout propagated).
+	select {
+	case <-blocked.cancelled:
+	default:
+		t.Fatal("blocked source was not cancelled by the per-source timeout")
+	}
+
+	// The blocked source contributes nothing; the other two still return.
+	if len(got) != 2 {
+		t.Fatalf("expected 2 signals (blocked source skipped), got %d: %+v", len(got), got)
+	}
+	if got[0].ID != "c1" || got[1].ID != "e1" {
+		t.Fatalf("unexpected signals: %+v", got)
+	}
+
+	// Gather must not have waited far beyond the per-source timeout.
+	if elapsed > 2*time.Second {
+		t.Fatalf("gather took too long (%v); per-source timeout not enforced", elapsed)
+	}
+}
+
+// TestCorrelatorContextCancellationPropagates proves an already-cancelled parent
+// context still unblocks a blocked source (cancellation propagates through the
+// derived per-source timeout context).
+func TestCorrelatorContextCancellationPropagates(t *testing.T) {
+	blocked := &blockingLogSource{name: "fake/loki"}
+	provider := sources.NewProvider(
+		"test-cluster",
+		blocked,
+		&fakeMetricSource{},
+		&fakeDeploySource{name: "fake/argocd"},
+		&fakeClusterSource{name: "fake/k8s"},
+	)
+
+	corr := NewCorrelator(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ref := model.ResourceRef{Cluster: "test-cluster", Namespace: "default", Kind: "Deployment", Name: "api"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled
+
+	done := make(chan []model.Signal, 1)
+	go func() { done <- corr.Timeline(ctx, provider, ref, sources.TimeRange{}) }()
+
+	select {
+	case <-done:
+		// returned promptly — cancellation propagated
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeline did not return after parent context cancellation")
 	}
 }

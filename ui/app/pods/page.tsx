@@ -9,6 +9,7 @@ import { ResourceToolbar } from '@/components/resource-toolbar'
 import { ContainerSquares } from '@/components/container-squares'
 import { ImageTags } from '@/components/image-tag'
 import { LoadingState, ErrorState, EmptyState } from '@/components/view-states'
+import { useLivePoll } from '@/lib/use-live'
 import { denseTableCls, denseThRowCls, denseThCls, denseTdCls, kindStyle, podPhaseStyle, podPhaseDot, focusRingCls } from '@/lib/styles'
 
 export default function PodsPage() {
@@ -44,6 +45,9 @@ export default function PodsPage() {
     const cancel = load()
     return cancel
   }, [load])
+
+  // Pods have no SSE stream; auto-refresh on a visibility-aware interval.
+  useLivePoll(() => setNonce((n) => n + 1), { enabled: !!cluster })
 
   const discoveredNamespaces = useMemo(() => pods.map((p) => p.namespace), [pods])
 

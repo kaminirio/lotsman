@@ -5,6 +5,7 @@ import { listIncidents, SEVERITY_LABELS, type Incident } from '@/lib/api'
 import { ResourceToolbar } from '@/components/resource-toolbar'
 import { LoadingState, ErrorState, EmptyState } from '@/components/view-states'
 import { AiExplanation } from '@/components/ai-explanation'
+import { useIncidentStream } from '@/lib/use-live'
 import { severityStyle, signalKindStyle, relativeTime } from '@/lib/styles'
 
 export default function IncidentsPage() {
@@ -38,6 +39,20 @@ export default function IncidentsPage() {
     return cancel
   }, [load])
 
+  // Live updates: the SSE incident bus pushes a full Incident per open/update.
+  // Upsert by id (replace in place, or prepend if new) so the list stays current
+  // without a manual refresh.
+  const onLiveIncident = useCallback((inc: Incident) => {
+    setIncidents((prev) => {
+      const idx = prev.findIndex((p) => p.id === inc.id)
+      if (idx === -1) return [inc, ...prev]
+      const next = [...prev]
+      next[idx] = inc
+      return next
+    })
+  }, [])
+  useIncidentStream(onLiveIncident)
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     if (!q) return incidents
@@ -59,6 +74,15 @@ export default function IncidentsPage() {
         searchPlaceholder="Filter incidents…"
         onRefresh={() => setNonce((n) => n + 1)}
         refreshing={loading}
+        extra={
+          <span
+            className="inline-flex items-center gap-1.5 font-tech text-[11px] text-slate-500"
+            title="Live — incidents stream in via server-sent events"
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 pulse-slow" aria-hidden="true" />
+            Live
+          </span>
+        }
       />
 
       <div className="flex-1 overflow-auto p-5">

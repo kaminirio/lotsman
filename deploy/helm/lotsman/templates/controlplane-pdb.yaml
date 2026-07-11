@@ -1,0 +1,18 @@
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "lotsman.controlPlane.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lotsman.componentLabels" (dict "root" . "component" "control-plane") | nindent 4 }}
+spec:
+  {{- if .Values.controlPlane.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.controlPlane.podDisruptionBudget.minAvailable }}
+  {{- else if .Values.controlPlane.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.controlPlane.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "lotsman.componentSelectorLabels" (dict "root" . "component" "control-plane") | nindent 6 }}
+{{- end }}

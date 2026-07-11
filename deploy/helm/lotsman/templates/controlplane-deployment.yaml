@@ -1,0 +1,101 @@
+{{- if .Values.controlPlane.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lotsman.controlPlane.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lotsman.componentLabels" (dict "root" . "component" "control-plane") | nindent 4 }}
+spec:
+  replicas: {{ .Values.controlPlane.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "lotsman.componentSelectorLabels" (dict "root" . "component" "control-plane") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lotsman.componentSelectorLabels" (dict "root" . "component" "control-plane") | nindent 8 }}
+        {{- with .Values.controlPlane.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/controlplane-configmap.yaml") . | sha256sum }}
+        {{- with .Values.controlPlane.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "lotsman.controlPlane.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.controlPlane.podSecurityContext | nindent 8 }}
+      containers:
+        - name: control-plane
+          image: {{ include "lotsman.image" (dict "root" . "repository" .Values.controlPlane.image.repository "tag" .Values.controlPlane.image.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.controlPlane.securityContext | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "lotsman.controlPlane.fullname" . }}
+          env:
+            - name: LOTSMAN_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "lotsman.secretName" . }}
+                  key: {{ .Values.secret.keys.agentToken }}
+            - name: LOTSMAN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "lotsman.secretName" . }}
+                  key: {{ .Values.secret.keys.databaseUrl }}
+                  optional: true
+            - name: LOTSMAN_SSO_CONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "lotsman.secretName" . }}
+                  key: {{ .Values.secret.keys.ssoConfig }}
+                  optional: true
+            {{- if .Values.controlPlane.directMode.enabled }}
+            - name: LOTSMAN_ARGOCD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "lotsman.secretName" . }}
+                  key: {{ .Values.secret.keys.argocdToken }}
+                  optional: true
+            {{- end }}
+            {{- with .Values.controlPlane.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: api
+              containerPort: 8080
+              protocol: TCP
+            - name: gateway
+              containerPort: 9090
+              protocol: TCP
+          {{- with .Values.controlPlane.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.controlPlane.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+      {{- with .Values.controlPlane.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controlPlane.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controlPlane.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

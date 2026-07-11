@@ -89,7 +89,7 @@ export function relativeTime(iso: string): string {
 export function severityStyle(sev: Severity): string {
   switch (sev) {
     case 3:
-      return 'bg-red-500/10 text-red-400 ring-1 ring-red-500/20' // critical
+      return 'bg-red-500/15 text-red-300 ring-1 ring-red-500/30' // critical
     case 2:
       return 'bg-red-500/10 text-red-400 ring-1 ring-red-500/20' // error
     case 1:

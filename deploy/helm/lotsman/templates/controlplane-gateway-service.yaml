@@ -1,0 +1,30 @@
+{{- if .Values.controlPlane.enabled }}
+{{- $gw := .Values.controlPlane.gatewayService }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lotsman.controlPlane.fullname" . }}-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lotsman.componentLabels" (dict "root" . "component" "control-plane") | nindent 4 }}
+  {{- with $gw.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $gw.type }}
+  {{- if and (eq $gw.type "LoadBalancer") $gw.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml $gw.loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+  selector:
+    {{- include "lotsman.componentSelectorLabels" (dict "root" . "component" "control-plane") | nindent 4 }}
+  ports:
+    - name: gateway
+      port: {{ $gw.port }}
+      targetPort: gateway
+      protocol: TCP
+      {{- if and (eq $gw.type "NodePort") $gw.nodePort }}
+      nodePort: {{ $gw.nodePort }}
+      {{- end }}
+{{- end }}
