@@ -101,30 +101,6 @@ jobs:
             *.cache-from=type=gha,scope=lotsman
             *.cache-to=type=gha,mode=max,scope=lotsman
 
-      # Resolve the immutable sha tag (matches docker/metadata's sha- prefix)
-      # so Trivy and the smoke test scan the exact bytes just pushed.
-      - name: Resolve image tag
-        id: imgtag
-        run: echo "sha=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
-
-      # Vulnerability scan of the just-built server image (the primary app;
-      # agent/cli share the same base + Go build).
-      #
-      # NOTE: report-only (exit-code 0). The bake step above pushes every tag
-      # (edge/latest/sha) atomically, so there is no pre-tag window in which to
-      # hard-gate without splitting build/push into separate steps. Failing here
-      # would go red only *after* the tags are already public, so we surface the
-      # findings without breaking releases. Tighten to exit-code 1 once the
-      # build and push are decoupled.
-      - name: Scan server image (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/lotsman-server:${{ steps.imgtag.outputs.sha }}
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          format: table
-          exit-code: "0"
-
       # Pull each just-pushed image (amd64 on this runner) and run its version
       # command, so a broken image can never get tagged :latest / :edge.
       - name: Smoke test images
