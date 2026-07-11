@@ -105,7 +105,9 @@ func (m *Manager) CurrentUser(r *http.Request) (User, bool) {
 		return User{}, false
 	}
 	// Reject tokens that were explicitly logged out (revoked) before their expiry.
-	if m.revoked != nil && m.revoked.isRevoked(claims.ID) {
+	// Keys on the session lineage (sid) so a refreshed token is still rejected, with
+	// a jti fallback for older pre-sid tokens.
+	if m.isSessionRevoked(claims) {
 		return User{}, false
 	}
 	return User{

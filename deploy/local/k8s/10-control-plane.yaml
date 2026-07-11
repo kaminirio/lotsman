@@ -15,10 +15,32 @@ spec:
       labels:
         app: lotsman-control-plane
     spec:
+      # Run as an arbitrary non-root UID: the alpine-based image sets no USER, so
+      # pin one here. The server only binds :8080/:9090 (>1024) and reads
+      # world-readable CA certs — no root needed.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: control-plane
           image: lotsman-server:dev
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
           env:
             - name: LOTSMAN_ADDR
               value: ":8080"
@@ -56,6 +78,13 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+          volumeMounts:
+            # readOnlyRootFilesystem needs a writable temp dir (Go's os.TempDir).
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

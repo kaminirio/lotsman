@@ -62,3 +62,17 @@ func (s *revocationSet) gcLocked() {
 		}
 	}
 }
+
+// isSessionRevoked reports whether a session was explicitly logged out. It checks
+// the stable lineage id (sid) first — logout revokes by sid, so this rejects a
+// token even after any number of sliding refreshes minted new jtis — and falls
+// back to the per-mint jti for older tokens (pre-sid cookies) that carry no sid.
+func (m *Manager) isSessionRevoked(claims *SessionClaims) bool {
+	if m.revoked == nil || claims == nil {
+		return false
+	}
+	if claims.SID != "" && m.revoked.isRevoked(claims.SID) {
+		return true
+	}
+	return m.revoked.isRevoked(claims.ID)
+}

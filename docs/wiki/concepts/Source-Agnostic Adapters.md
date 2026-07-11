@@ -3,7 +3,7 @@ title: "Source-Agnostic Adapters"
 type: concept
 tags: [concept, architecture, adapters]
 created: 2026-06-21 13:30:00
-updated: 2026-06-24 15:30:00
+updated: 2026-07-11 17:58:00
 status: current
 aliases: ["Sources", "Provider"]
 ---
@@ -66,6 +66,12 @@ The seam that makes Lotsman cloud/environment-agnostic: four neutral Go interfac
 - **Env var reveal** — when the `Reveal` flag is set (requires `LOTSMAN_ALLOW_ENV_REVEAL=1` in the agent environment and admin role on the caller), `ListPods` resolves `valueFrom` references (Secret/ConfigMap) to actual values with provenance metadata. Non-admin callers receive all literal values masked and `valueFrom` shown as unresolved reference chips. The same gate applies to `GetSecret` values. See [[Authentication and RBAC]].
 - **Severity escalation** — Kubernetes `Warning` events with critical reasons (OOMKilled, CrashLoopBackOff, BackOff, FailedScheduling, FailedMount, Evicted, Unhealthy, ImagePullBackOff, …) are escalated to `SeverityError`; the engine detector in `internal/engine/detector/kubernetes.go` gates candidates at `>= SeverityError`.
 - **Dependency added:** `k8s.io/client-go v0.36.2` (+ `k8s.io/api`, `k8s.io/apimachinery`). The 3 HTTP adapters remain stdlib-only.
+- **QPS/Burst/Timeout tuned** (2026-07-11 campaign) — `client-go`'s rest config previously left these unset (library defaults); now tuned explicitly to avoid client-side throttling surprises under load.
+- **Watch is still poll-based** — the agent's Kubernetes watch-event feed (used by the now-wired push path, see [[Agent Control Plane Topology]]) polls rather than using a `client-go` informer; a true informer is future work.
+
+### HTTP Adapter Hardening (2026-07-11 campaign)
+
+The three stdlib-HTTP adapters (loki, victoriametrics, argocd) previously used `http.DefaultClient` with no timeout and a single `Do` call with no retry. Both gaps were closed: each adapter is now constructed with a timeout-bearing `*http.Client`, and transient failures are retried with backoff. See [[Backlog Improvement Campaign Waves 0-3 2026-07-11]].
 
 ## Dependency Boundary
 
@@ -85,4 +91,5 @@ The seam that makes Lotsman cloud/environment-agnostic: four neutral Go interfac
 - **Relevant skills:** `grafana/skills@loki`, `grafana/skills@promql` — see [[Development Skills]]
 - **Implementation reports:** [[Feature Source Adapter Implementation 2026-06-21]], [[Feature Pod Inspection 2026-06-21]], [[Feature Kubernetes Resource Inspection 2026-06-22]]
 - **Improve pass report:** [[Improve Engine Hardening and CVE Remediation 2026-06-24]] (remote proxy JSON round-trip + error-propagation + empty-payload tests added)
+- **Backlog campaign report:** [[Backlog Improvement Campaign Waves 0-3 2026-07-11]] (HTTP client timeouts + retry/backoff; client-go QPS/Burst/Timeout tuning)
 - **Sources:** `internal/sources/sources.go`, `docs/adr/0003-source-agnostic-adapters.md`, `docs/adr/0004-query-through-telemetry.md`

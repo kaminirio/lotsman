@@ -3,7 +3,7 @@ title: "Authentication and RBAC"
 type: concept
 tags: [concept, architecture, auth, rbac, oauth, jwt]
 created: 2026-06-21 16:08:49
-updated: 2026-06-24 16:14:46
+updated: 2026-07-11 17:58:00
 status: current
 aliases: ["Auth", "SSO", "GitHub OAuth"]
 ---
@@ -74,8 +74,13 @@ Login admission grants nothing on its own — the enforcer applies deny-by-defau
 
 - HS256 JWT written into an `HttpOnly; SameSite=Strict` cookie.
 - Algorithm-confusion-proof: uses `jwt.ParseWithClaims` with an explicit `HS256` algorithm check — rejects RS256/none tokens.
-- `SessionClaims` and `User` carry `Groups []string` (embedded at login time; refreshed on re-login, ~8 h).
+- `SessionClaims` and `User` carry `Groups []string` (embedded at login time; refreshed on re-login).
 - Membership is a **login-time snapshot** — a user's group membership is stale until they re-authenticate.
+- **Sliding expiry (2026-07-11 campaign)** — the previous fixed 8h hard-logout was replaced with a sliding session: activity extends the session, tracked by a lineage ID with a 24h absolute cap so a lineage cannot be extended indefinitely. A code-review finding during that campaign — a revoked lineage could still slide — was fixed by checking revocation on every slide, not only at issuance. See [[Backlog Improvement Campaign Waves 0-3 2026-07-11]].
+
+### Rate Limiting (`internal/auth` + `internal/api`)
+
+Per-IP token-bucket rate limiting was added on `GET /auth/login`, `GET /auth/callback`, and `POST /api/v1/investigate` (2026-07-11 campaign) — previously no route had a limiter, leaving the OAuth handshake and the expensive investigate path open to brute-force/hammer abuse.
 
 ### CSRF Middleware (`internal/auth/middleware.go`)
 
@@ -146,11 +151,12 @@ UI gating is **convenience-only** — all real enforcement is server-side.
 
 ## Known Limitations
 
-- **Group membership is a login-time snapshot** — stale until re-login (~8 h). A webhook-invalidation mechanism would eliminate the window but is deferred.
+- **Group membership is a login-time snapshot** — stale until re-login. A webhook-invalidation mechanism would eliminate the window but is deferred.
 - **`fetchGitHubGroups` has no integration test** — requires a fake-GitHub HTTP server harness (follow-up).
 - **Bindings are config-file-only, not persisted** — no runtime grant/revoke; must restart the server to change bindings. A `bindings` Postgres table and mutation API are the next auth step (blocked on Postgres store). See [[Persistence and State]].
 - **Pod logs returned unscrubbed** — `CanView` gates access but no secret-pattern redaction is applied to log content.
-- **mTLS for gRPC agent transport** — still open under ADR-0002 (separate feature).
+- **mTLS for gRPC agent transport** — still open under ADR-0002 (separate feature). Agent enrollment is fail-closed as of the 2026-07-11 campaign, but the transport itself remains plaintext (`insecure.NewCredentials()`).
+- **Session revocation is in-memory per-replica** — the 2026-07-11 campaign's sliding-session lineage fix closes the "revoked-but-still-sliding" escape, but a durable/HA-shared revocation store (Redis/PG) is still open.
 
 ## Open Items
 
@@ -158,6 +164,7 @@ UI gating is **convenience-only** — all real enforcement is server-side.
 - [ ] Fake-GitHub test harness for `fetchGitHubGroups`.
 - [ ] Pod log content scrubbing (secret-pattern redaction).
 - [ ] mTLS for gRPC agent link (ADR-0002).
+- [ ] Durable/HA session revocation store (Redis/PG-backed).
 
 ## Relationships and Context
 
@@ -166,4 +173,5 @@ UI gating is **convenience-only** — all real enforcement is server-side.
 - **Implementation reports:** [[Feature Platform Foundation 2026-06-21]], [[Feature Pod Inspection 2026-06-21]], [[Feature Kubernetes Resource Inspection 2026-06-22]]
 - **Strong RBAC feature report:** [[Feature Strong RBAC Config-Driven 2026-06-24]]
 - **Improve pass report:** [[Improve Engine Hardening and CVE Remediation 2026-06-24]]
+- **Backlog campaign report:** [[Backlog Improvement Campaign Waves 0-3 2026-07-11]] (sliding sessions, rate limiting, fail-closed agent auth)
 - **Sources:** `internal/auth/`, `internal/rbac/`, `docs/adr/0007-auth-github-oauth.md`

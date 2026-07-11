@@ -490,5 +490,101 @@ func TestMiddlewareGetNoCSRFNeeded(t *testing.T) {
 	}
 }
 
+// API-5: the /api/v1 middleware rejections use the JSON {"error":...} envelope
+// rather than the old http.Error text/plain body.
+func TestMiddlewareUnauthenticatedJSONEnvelope(t *testing.T) {
+	m := NewManager(validConfigJSON(t, "octocat"))
+	h := m.Middleware(newOKHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil) // no cookie
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("want application/json, got %q", ct)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body must be JSON: %v (%q)", err, rec.Body.String())
+	}
+	if body["error"] == "" {
+		t.Errorf("want non-empty error field, got %v", body)
+	}
+}
+
+// --- Sliding session expiry (API-7) ---------------------------------------
+
+func findCookie(cookies []*http.Cookie, name string) *http.Cookie {
+	for _, c := range cookies {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// A session within sessionRefreshWindow of expiry is re-issued as a fresh cookie
+// on the response, with security flags preserved and expiry pushed out.
+func TestMiddlewareRefreshesNearExpirySession(t *testing.T) {
+	m := NewManager(validConfigJSON(t, "octocat"))
+	h := m.Middleware(newOKHandler())
+
+	nearExpiry, err := MintSession([]byte(testSecret), "octocat", "", "", "github", nil, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("mint near-expiry: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: nearExpiry})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("near-expiry authed GET: got %d, want 200", rec.Code)
+	}
+	ck := findCookie(rec.Result().Cookies(), sessionCookie)
+	if ck == nil {
+		t.Fatal("near-expiry session must be refreshed with a new Set-Cookie, got none")
+	}
+	if ck.Value == "" || ck.Value == nearExpiry {
+		t.Fatalf("refreshed cookie must carry a new token; got %q", ck.Value)
+	}
+	if !ck.HttpOnly || ck.SameSite != http.SameSiteLaxMode {
+		t.Errorf("refreshed cookie must keep HttpOnly + SameSite=Lax; got HttpOnly=%v SameSite=%v", ck.HttpOnly, ck.SameSite)
+	}
+	claims, err := VerifySession([]byte(testSecret), ck.Value)
+	if err != nil {
+		t.Fatalf("refreshed token must verify: %v", err)
+	}
+	if time.Until(claims.ExpiresAt.Time) <= sessionRefreshWindow {
+		t.Error("refreshed token must extend expiry beyond the refresh window")
+	}
+}
+
+// A full-lifetime session (well outside the refresh window) must NOT be
+// re-issued, so refresh only kicks in near expiry.
+func TestMiddlewareDoesNotRefreshFreshSession(t *testing.T) {
+	m := NewManager(validConfigJSON(t, "octocat"))
+	h := m.Middleware(newOKHandler())
+
+	fresh, err := MintSession([]byte(testSecret), "octocat", "", "", "github", nil, sessionTTL)
+	if err != nil {
+		t.Fatalf("mint fresh: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: fresh})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fresh authed GET: got %d, want 200", rec.Code)
+	}
+	if ck := findCookie(rec.Result().Cookies(), sessionCookie); ck != nil {
+		t.Fatalf("fresh session must NOT be refreshed; got Set-Cookie %q", ck.Value)
+	}
+}
+
 // compile-time guard: rbac roles referenced from auth stay valid.
 var _ = rbac.RoleAdmin

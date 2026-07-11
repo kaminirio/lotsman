@@ -161,14 +161,23 @@ func (m *Manager) HandleCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleLogout revokes the current session and clears the cookie. Revoking the
-// JTI (not just clearing the cookie) is what makes logout effective for the
-// stateless JWT — the token is rejected on subsequent requests even though it is
-// still within its validity window. Route: POST /auth/logout.
+// session lineage (not just clearing the cookie) is what makes logout effective
+// for the stateless JWT — the token is rejected on subsequent requests even
+// though it is still within its validity window. It revokes by the stable
+// lineage id (sid) so a token that has been slid to a new jti by refresh is still
+// killed; for older tokens without a sid it falls back to the per-mint jti.
+// Route: POST /auth/logout.
 func (m *Manager) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	if m.enabled && m.revoked != nil {
 		if ck, err := r.Cookie(sessionCookie); err == nil && ck.Value != "" {
 			if claims, err := VerifySession([]byte(m.cfg.SessionSecret), ck.Value); err == nil && claims.ExpiresAt != nil {
-				m.revoked.revoke(claims.ID, claims.ExpiresAt.Time)
+				// Revoke the lineage (sid) so the whole refresh chain dies; fall back to
+				// the jti for pre-sid tokens. Both are self-bounded to the token's expiry.
+				key := claims.SID
+				if key == "" {
+					key = claims.ID
+				}
+				m.revoked.revoke(key, claims.ExpiresAt.Time)
 			}
 		}
 	}

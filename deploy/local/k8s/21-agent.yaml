@@ -16,10 +16,32 @@ spec:
         app: lotsman-agent
     spec:
       serviceAccountName: lotsman-agent
+      # Run as an arbitrary non-root UID: the alpine-based image sets no USER, so
+      # pin one here. The agent only dials out to the control plane and reads its
+      # in-cluster SA token (group-readable) — no root needed.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: agent
           image: lotsman-agent:dev
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
           env:
             - name: LOTSMAN_CONTROL_PLANE_ADDR
               value: "lotsman-control-plane.lotsman.svc:9090"
@@ -35,3 +57,10 @@ spec:
               value: "http://argocd-server.argocd.svc"
             # LOTSMAN_ARGOCD_TOKEN injected later via patch if argocd-server needs auth.
             # LOTSMAN_KUBECONFIG unset -> in-cluster config for the kubernetes adapter.
+          volumeMounts:
+            # readOnlyRootFilesystem needs a writable temp dir (Go's os.TempDir).
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

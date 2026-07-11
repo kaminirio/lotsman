@@ -76,20 +76,31 @@ deny: every literal value is redacted for non-admins).
 > Direct mode (control plane in-process, no agent) has no agent gate; reveal
 > there is governed solely by the control plane's admin check.
 
-## Security posture / known limitations
+## Security posture
 
-The following are **documented but NOT fixed** in this scaffold. **Must fix
-before multi-tenant / production:**
+These manifests are a **local-dev template**, not a hardened production install
+(see `deploy/helm/` for the production chart). The three limitations previously
+flagged here have since been fixed in the control plane:
 
-- **(a) SSO grants global view.** With SSO enabled, every authenticated user is
-  currently a global *viewer* (sees all clusters/namespaces). This is **NOT
-  multi-tenant-safe** until per-namespace RBAC bindings land.
-- **(b) Pod logs are returned unscrubbed.** `GET .../pods/<pod>/logs` is gated
-  only by `CanView`; the log body is not redacted and **may contain secrets or
-  PII**.
-- **(c) Malformed SSO config fails open.** An invalid `LOTSMAN_SSO_CONFIG`
-  currently falls back to the anonymous-admin (no-SSO) path instead of failing
-  closed — a config typo can silently disable auth.
+- **(a) Per-namespace RBAC is enforced.** SSO no longer grants every
+  authenticated user a global view. Access is deny-by-default: a user sees only
+  the clusters/namespaces granted by a matching `bindings`/`group_bindings` entry
+  in `LOTSMAN_SSO_CONFIG`, and those bindings carry a `namespace` scope enforced
+  by `internal/rbac` (`CanAccess` matches cluster **and** namespace). Global admin
+  is granted only to `init_admin` and the anonymous local-dev principal.
+- **(b) Pod logs are redacted for non-admins.** `GET .../pods/<pod>/logs` runs
+  the body through `internal/redact` for non-admin viewers before returning it
+  (admins see verbatim). Note the redactor is best-effort pattern-based, not a
+  guarantee that every secret/PII shape is caught.
+- **(c) Malformed SSO config fails closed.** A present-but-invalid
+  `LOTSMAN_SSO_CONFIG` is fatal — the control plane refuses to start rather than
+  silently degrading to the anonymous-admin path. An *unset* config still enables
+  the intentional anonymous local-dev pass-through.
+
+**Still dev-only, before you copy these as a production base:** the manifests use
+`dev-token` for `LOTSMAN_AGENT_TOKEN` and plaintext (non-mTLS) agent↔control-plane
+transport (SEC-1), pin `:dev` image tags, and add no NetworkPolicy. Use the Helm
+chart and real secrets for anything multi-tenant.
 
 ## Tear down
 ```sh

@@ -1,6 +1,6 @@
 # ADR-0007 — Auth: GitHub OAuth + JWT sessions + RBAC
 
-**Status:** Accepted
+**Status:** Accepted — implemented (`internal/auth`, `internal/rbac`)
 
 ## Context
 The control plane needs authenticated operators and authorization scoped to clusters/
@@ -19,4 +19,8 @@ treated as an anonymous admin (local dev pass-through).
 - GitHub identity is familiar to operators; org/team slugs map directly to RBAC groups.
 - HttpOnly cookies + a CSRF header (`X-Requested-With`) on mutations — no token storage
   in `localStorage`.
-- Scaffold ships the interface and anonymous fallback; OAuth/JWT/RBAC are `TODO(impl)`.
+- Implemented in `internal/auth` (GitHub OAuth flow, JWT session cookies, group
+  resolution) and `internal/rbac` (per-cluster/per-namespace bindings enforced on
+  every resource handler). The anonymous local-dev fallback remains for an unset
+  `LOTSMAN_SSO_CONFIG`; a present-but-invalid config now fails closed (the control
+  plane refuses to start) rather than degrading to anonymous admin.

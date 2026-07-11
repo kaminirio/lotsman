@@ -3,7 +3,7 @@ title: "UI Design System"
 type: concept
 tags: [concept, frontend, ui, nextjs, lens]
 created: 2026-06-21 13:30:00
-updated: 2026-06-28 00:00:00
+updated: 2026-07-11 17:58:00
 status: current
 aliases: ["Warm Operator", "Lens UI", "UI Stack"]
 ---
@@ -55,6 +55,17 @@ The pod logs tab has a Raw/Pretty switcher:
 - **Single-binary deploy** — `internal/ui` embeds the `ui/` static export via `//go:embed all:dist`.
 - **Auth** — GitHub OAuth + HttpOnly JWT session cookies + RBAC with a structured SSO config (ADR-0007).
 
+## Testing, Linting, and Live Updates (2026-07-11 campaign)
+
+- **Tests** — Vitest + React Testing Library added (previously zero UI tests); 62 tests pass, including new coverage for the `use-live` hook.
+- **Lint** — `package.json` declared `"lint": "next lint"` but had no ESLint dependency/config, and Next 16 removed built-in `next lint`, so no linting ran at all. A flat-config ESLint setup now runs for real, gated in CI (CI-4) alongside a new CI job (CI-5) that verifies the UI export → `internal/ui/dist` embed contract.
+- **Live updates** — incidents/events/pods pages previously loaded once with a manual Refresh button despite the backend having an SSE incident bus (see [[Correlation Engine]]). SSE-based live updates and polling are now wired into those pages.
+- **Error boundaries** — `error.tsx`, `global-error.tsx`, and `not-found.tsx` added under `ui/app`; a render-time exception previously white-screened with no boundary.
+- **Severity/accessibility fixes** — the severity badge previously gave `critical` and `error` identical red styling in `styles.ts` (inconsistent with `eventSeverityStyle`); now visually distinct. An accessibility pass added skip-to-content, table caption/scope, and non-color-only status indicators (`container-squares.tsx` previously relied on color alone).
+- **Embed-failure handling** — `internal/ui/ui.go` previously panicked if the embedded UI dist failed to load; it now fails gracefully.
+
+See [[Backlog Improvement Campaign Waves 0-3 2026-07-11]] for the full campaign record.
+
 ## Future Shared Workspace
 
 The `securero/shared` workspace pattern (extracting `lib/styles`, auth context, and shared Go packages) remains a future option to reduce duplication across multiple operator tools on this stack.
@@ -65,4 +76,5 @@ The `securero/shared` workspace pattern (extracting `lib/styles`, auth context, 
 - **Related topics:** [[Correlation Engine]], [[Authentication and RBAC]], [[Source-Agnostic Adapters]]
 - **Relevant skills:** `frontend-design`, `frontend-dev-conventions`, `ui-ux-pro-max` — see [[Development Skills]]
 - **Implementation reports:** [[Feature Lens UI Redesign 2026-06-22]], [[Feature Pod Inspection 2026-06-21]]
+- **Backlog campaign report:** [[Backlog Improvement Campaign Waves 0-3 2026-07-11]] (Vitest + ESLint, SSE live updates, error boundaries, a11y/severity fixes)
 - **Sources:** `ui/`, `internal/ui/ui.go`, `docs/adr/0006-ui-stack.md`, `docs/adr/0007-auth-github-oauth.md`
