@@ -98,8 +98,34 @@ func newRootCmd() *cobra.Command {
 		newInvestigateCmd(opts),
 		newIncidentsCmd(opts),
 		newClustersCmd(opts),
+		newLoginCmd(),
+		newClusterTokenCmd(),
 	)
 	return root
+}
+
+// newLoginCmd wires `lotsman login` (ADR-0011). It parses its own flags (--api,
+// --username) so flag parsing is disabled at the cobra layer and the raw args are
+// handed to runLogin.
+func newLoginCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:                "login",
+		Short:              "Authenticate to the control plane and cache the session cookie",
+		DisableFlagParsing: true,
+		RunE:               func(_ *cobra.Command, args []string) error { return runLogin(args) },
+	}
+}
+
+// newClusterTokenCmd wires `lotsman cluster-token generate|list|revoke` (ADR-0010).
+// Like login it manages its own flags, so cobra flag parsing is disabled and the
+// raw args drive the subcommand dispatch in runClusterToken.
+func newClusterTokenCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:                "cluster-token",
+		Short:              "Manage per-cluster agent enrollment tokens (generate/list/revoke)",
+		DisableFlagParsing: true,
+		RunE:               func(_ *cobra.Command, args []string) error { return runClusterToken(args) },
+	}
 }
 
 // envOr returns the environment variable value or the fallback if unset/empty.
